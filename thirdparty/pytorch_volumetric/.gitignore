@@ -1,0 +1,6 @@
+.idea
+temp*
+dist
+*.egg-info
+*.pyc
+*.pkl
