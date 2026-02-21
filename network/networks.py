@@ -5,13 +5,24 @@
 
 import torch
 import torch.nn as nn
+import os
+import sys
 from torchvision.models.resnet import BasicBlock, Bottleneck
-from torchvision.models.resnet import model_urls
-from manopth.manolayer import ManoLayer
+from torchvision.models import resnet18, resnet34, resnet50, resnet101, resnet152
+try:
+    from torchvision.models import ResNet18_Weights, ResNet34_Weights, ResNet50_Weights, ResNet101_Weights, ResNet152_Weights
+except ImportError:
+    ResNet18_Weights = ResNet34_Weights = ResNet50_Weights = ResNet101_Weights = ResNet152_Weights = None
+_manopth_root = os.path.join(os.path.dirname(__file__), 'manopth')
+if os.path.isdir(_manopth_root) and _manopth_root not in sys.path:
+    sys.path.append(_manopth_root)
+try:
+    from manopth.manolayer import ManoLayer
+except ModuleNotFoundError:
+    from manopth.manopth.manolayer import ManoLayer
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 import numpy as np
-import os
 class ResNetBackbone(nn.Module):
     def __init__(self, resnet_type):
         resnet_spec = {18: (BasicBlock, [2, 2, 2, 2], [64, 64, 128, 256, 512], 'resnet18'),
@@ -77,7 +88,18 @@ class ResNetBackbone(nn.Module):
             return x
 
     def init_weights(self):
-        org_resnet = torch.utils.model_zoo.load_url(model_urls[self.name])
+        weights_map = {
+            'resnet18': (resnet18, ResNet18_Weights.IMAGENET1K_V1 if ResNet18_Weights is not None else None),
+            'resnet34': (resnet34, ResNet34_Weights.IMAGENET1K_V1 if ResNet34_Weights is not None else None),
+            'resnet50': (resnet50, ResNet50_Weights.IMAGENET1K_V1 if ResNet50_Weights is not None else None),
+            'resnet101': (resnet101, ResNet101_Weights.IMAGENET1K_V1 if ResNet101_Weights is not None else None),
+            'resnet152': (resnet152, ResNet152_Weights.IMAGENET1K_V1 if ResNet152_Weights is not None else None),
+        }
+        model_fn, weights = weights_map[self.name]
+        if weights is not None:
+            org_resnet = model_fn(weights=weights).state_dict()
+        else:
+            org_resnet = model_fn(pretrained=True).state_dict()
         # drop orginal resnet fc layer, add 'None' in case of no fc layer, that will raise error
         org_resnet.pop('fc.weight', None)
         org_resnet.pop('fc.bias', None)
@@ -324,4 +346,3 @@ def dehomoify(points):
         cartesian points: (B, N, 3/2)
     """
     return points[..., :-1] / points[..., -1:]
-

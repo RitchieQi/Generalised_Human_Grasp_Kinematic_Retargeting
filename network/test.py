@@ -5,7 +5,7 @@ import argparse
 from tqdm import tqdm
 import torch
 from loguru import logger
-from optimisation_tmp.utils import export_pose_results
+from utils import export_pose_results
 from training_utils import Tester
 import torch.multiprocessing as mp
 from torch.distributed import init_process_group, destroy_process_group, all_reduce
@@ -18,6 +18,8 @@ def parse_args():
     args = parser.parse_args()
 
     return args
+
+
 def ddp_setup(rank: int, world_size: int):
    """
    Args:
@@ -28,15 +30,15 @@ def ddp_setup(rank: int, world_size: int):
    os.environ["MASTER_PORT"] = "12330"
    torch.cuda.set_device(rank) #rank
    init_process_group(backend="nccl", rank=rank, world_size=world_size)
-   
+
 def main(rank):
     local_rank = rank
     ddp_setup(local_rank, 1)
     device = 'cuda:%d' % local_rank
     torch.cuda.set_device(local_rank)
-    exp = 'hmano_osdf'
-    obj_pose_result_dir = osp.join(osp.dirname(__file__), exp, 'obj_pose_results')
-    hand_pose_result_dir = osp.join(osp.dirname(__file__), exp, 'hand_pose_results')
+    exp = osp.dirname(__file__)
+    obj_pose_result_dir = osp.join(exp, 'obj_pose_results')
+    hand_pose_result_dir = osp.join(exp, 'hand_pose_results')
     if not osp.exists(obj_pose_result_dir):
         os.makedirs(obj_pose_result_dir)
     if not osp.exists(hand_pose_result_dir):

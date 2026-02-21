@@ -4,12 +4,19 @@ import skimage.measure
 import time
 import torch
 import os
+import sys
 import yaml
 import json
 from loguru import logger
 from networks import kinematic_embedding
 from solver import icp_ts
-from manopth.manolayer import ManoLayer
+_manopth_root = os.path.join(os.path.dirname(__file__), 'manopth')
+if os.path.isdir(_manopth_root) and _manopth_root not in sys.path:
+    sys.path.append(_manopth_root)
+try:
+    from manopth.manolayer import ManoLayer
+except ModuleNotFoundError:
+    from manopth.manopth.manolayer import ManoLayer
 import traceback
 import os.path as osp
 
@@ -78,7 +85,7 @@ def reconstruct(filename, obj_sdf_decoder, latent_vec, metas, hand_pose_results,
     voxel_origin = new_origin.tolist()
     
     verts,faces,trans, scale = convert_verts_to_ply(not_optim=False,
-                                                   sdf_result_dir=osp.join(osp.dirname(__file__),'hmano_osdf','mesh_hand'),
+                                                   sdf_result_dir=osp.join(osp.dirname(__file__),'mesh_hand'),
                                                    ply_filename_out=ply_filename_hand + '.ply',
                                                    testset_hand_source=data_dir_hand,
                                                    recon_scale=recon_scale,
@@ -91,7 +98,7 @@ def reconstruct(filename, obj_sdf_decoder, latent_vec, metas, hand_pose_results,
                                voxel_origin=voxel_origin, 
                                voxel_size=voxel_size, 
                                not_optim=True, 
-                               sdf_result_dir=osp.join(osp.dirname(__file__),'hmano_osdf','mesh'), 
+                               sdf_result_dir=osp.join(osp.dirname(__file__),'mesh'), 
                                ply_filename_out=ply_filename_obj + '.ply', 
                                testset_obj_source=data_dir, 
                                recon_scale=recon_scale, 
@@ -151,9 +158,9 @@ def convert_sdf_samples_to_ply(sdf_tensor, voxel_origin, voxel_size, not_optim, 
     Convert sdf samples to .ply
     This function adapted from: https://github.com/RobotLocomotion/spartan
     """
-    hand_pose_result_dir = osp.join(osp.dirname(__file__), 'hmano_osdf', 'hand_pose_results')
+    hand_pose_result_dir = osp.join(osp.dirname(__file__), 'hand_pose_results')
     sdf_tensor = sdf_tensor.numpy()
-    # obj_pose_result_dir = osp.join(osp.dirname(__file__), 'hmano_osdf', 'obj_pose_results')
+    # obj_pose_result_dir = osp.join(osp.dirname(__file__), 'obj_pose_results')
     # with open(os.path.join(obj_pose_result_dir, '_'.join(ply_filename_out.split('_')[:-1]) + '.json'), 'r') as f:
     #     data_ = json.load(f)
     # cam_extr = np.array(data_['cam_extr'], dtype=np.float32)
@@ -236,7 +243,7 @@ def convert_sdf_samples_to_ply(sdf_tensor, voxel_origin, voxel_size, not_optim, 
             return None, None, np.array([0,0,0]), np.array([1 / recon_scale])
 
 def convert_verts_to_ply(not_optim, sdf_result_dir, ply_filename_out, testset_hand_source, recon_scale, offset=None, scale=None):
-    hand_pose_result_dir = osp.join(osp.dirname(__file__), 'hmano_osdf', 'hand_pose_results')
+    hand_pose_result_dir = osp.join(osp.dirname(__file__), 'hand_pose_results')
     with open(os.path.join(hand_pose_result_dir, '_'.join(ply_filename_out.split('_')[:-1]) + '.json'), 'r') as f:
         data = json.load(f)
     cam_extr = np.array(data['cam_extr'], dtype=np.float32)

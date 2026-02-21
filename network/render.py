@@ -8,7 +8,7 @@ import trimesh
 
 import cv2
 import pyrender
-from dataset import CtcSDF_dataset
+from dataset.dataset import CtcSDF_dataset
 
 def deproject_points(points, cam_intr, cam_extr):
     points_3d = np.asarray(points)

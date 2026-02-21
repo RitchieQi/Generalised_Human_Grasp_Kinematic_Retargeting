@@ -27,7 +27,7 @@ def main():
     #                           input_image_size=(256, 256))
     data_root = osp.join(osp.dirname(__file__), '..', 'CtcSDF', 'data')
     summaries = []
-    output_dir = osp.join(osp.dirname(__file__), 'hmano_osdf')
+    output_dir = osp.dirname(__file__)
 
     num_proc = 10
     num_testset_samples = 10# 5928

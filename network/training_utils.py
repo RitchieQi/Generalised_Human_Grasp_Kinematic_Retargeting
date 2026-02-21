@@ -10,9 +10,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 import torch.optim
-from networks.model import get_model
+from model import get_model
 from utils import Timer
-from dataset import CtcSDF_dataset
+from dataset.dataset import CtcSDF_dataset
 class Base_trainer(ABC):
     def __init__(self, exp, log_name = 'logs.txt'):
         self.current_epoch = 0
@@ -20,9 +20,12 @@ class Base_trainer(ABC):
         self.gpu_timer = Timer()
         self.read_timer = Timer()
         self.exp = exp
+        self.log_dir = osp.join(self.exp, 'logs')
+        self.model_dir = osp.join(self.exp, 'ckpt')
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.model_dir, exist_ok=True)
         self.logger = logger
-        self.logger.add(osp.join(exp,'logs', log_name))
-        self.model_dir = osp.join(osp.dirname(__file__), self.exp, 'models')
+        self.logger.add(osp.join(self.log_dir, log_name))
 
     
     @abstractmethod

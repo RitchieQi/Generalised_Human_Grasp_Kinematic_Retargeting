@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 from utils import export_pose_results, reduce_tensor
-from networks.training_utils import Trainer, Tester
+from training_utils import Trainer, Tester
 import os.path as osp
 import torch.multiprocessing as mp
 from torch.distributed import init_process_group, destroy_process_group, all_reduce
@@ -55,7 +55,7 @@ def main(rank):
     if local_rank == 0:
         writer_dict = {'writer': SummaryWriter(log_dir = log_dir), 'train_global_steps': 0}
 
-    trainer = Trainer(batch_size=256, num_gpus=world_size, exp='hmano_osdf')
+    trainer = Trainer(batch_size=256, num_gpus=world_size, exp=osp.dirname(__file__))
     trainer._make_batch_generator()
     trainer._make_model(local_rank)
     end_epoch = 2800

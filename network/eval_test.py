@@ -7,8 +7,8 @@ import json
 
 
 def main():
-    hand_pose_dir = osp.join(osp.dirname(__file__), 'hmano_osdf', 'hand_pose_results')
-    obj_pose_dir = osp.join(osp.dirname(__file__), 'hmano_osdf', 'obj_pose_results')
+    hand_pose_dir = osp.join(osp.dirname(__file__), 'hand_pose_results')
+    obj_pose_dir = osp.join(osp.dirname(__file__), 'obj_pose_results')
     
     anno = osp.join(osp.dirname(__file__), '..', 'CtcSDF', 'data', 'dexycb_test_s0.json')
     

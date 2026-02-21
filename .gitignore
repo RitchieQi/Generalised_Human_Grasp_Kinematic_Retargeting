@@ -233,3 +233,28 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-generated artifacts (large / unnecessary for GitHub)
+network/ckpt/
+network/logs/
+network/obj_pose_results/
+network/hand_pose_results/
+network/mesh/
+network/mesh_hand/
+ckpt/
+checkpoints/
+logs/
+wandb/
+
+# Model and checkpoint binaries
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+*.onnx
+*.h5
+
+# Large archives
+*.tar.gz
+*.tgz
+*.7z
