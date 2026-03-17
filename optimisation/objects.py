@@ -401,10 +401,6 @@ class object_sdf():
             print("ides", ides)
             length = ides.size(0)
             sorted, ids = torch.sort(ides)
-            # print("indices inplace", ids)
-            # print("indices sorted", sorted)
-            # reverse_indices = torch.empty_like(ids).to(self.device)
-            # reverse_indices[ids] = torch.arange(length).to(self.device)
             return ids
             
         contact_pack = self.hand_model.get_contact_points_normals_packed()
@@ -596,17 +592,11 @@ class object_sdf():
             contact_0 = centroid_p[i].mean(axis=0) if centroid_p[i].shape[0] <= centroid_p[j].shape[0] else centroid_p[j].mean(axis=0)
             contact_1 = centroid_p[j].mean(axis=0) if centroid_p[i].shape[0] <= centroid_p[j].shape[0] else centroid_p[i].mean(axis=0)
             pca_base_ = p_collection[i] if centroid_p[i].shape[0] > centroid_p[j].shape[0] else p_collection[j]
-            #pca_base = pca_base.squeeze()
             pca_base = np.vstack(np.atleast_1d(pca_base_)).astype(np.float32)
             uniq_labels_n = np.delete(uniq_labels_n, np.where(uniq_labels_n == i))
             uniq_labels_n = np.delete(uniq_labels_n, np.where(uniq_labels_n == j))
             pca_base_list = np.vstack([p for i in uniq_labels_n for p in p_collection[i]])
-            # print("pca_base_list", pca_base_list.shape)
             pca_base = np.vstack([pca_base, pca_base_list])
-
-
-            # print("uniq_labels_n", uniq_labels_n)
-
         else:
             contact_0 = centroid_p[0].mean(axis=0) if centroid_p[0].shape[0] <= centroid_p[1].shape[0] else centroid_p[1].mean(axis=0)
             contact_1 = centroid_p[1].mean(axis=0) if centroid_p[0].shape[0] <= centroid_p[1].shape[0] else centroid_p[0].mean(axis=0)
