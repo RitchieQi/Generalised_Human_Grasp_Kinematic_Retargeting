@@ -604,7 +604,7 @@ class similarity:
         w *= 0.25
         gf = self.obj.gf_residual(x.view(1,-1,3), w.view(1,-1,4))
         print("gf", gf)
-        return gf["Gf"]
+        return gf["net_wrench"]
     
     def get_gf_residual(self):
         assert self.w is not None and self.x is not None and self.x.size(0) == self.w.size(0)
@@ -615,10 +615,10 @@ class similarity:
 
         w = self.w.view(-1,4)[col_id]
         gf = self.obj.gf_residual(key_points.view(1,-1,3), w.view(1,-1,4))
-        print("gf",gf["Gf"])
+        print("gf", gf["net_wrench"])
 
 
-        return gf["Gf"]
+        return gf["net_wrench"]
 
     def get_dist_residual(self):
         assert self.w is not None and self.x is not None and self.x.size(0) == self.w.size(0)
@@ -896,26 +896,9 @@ def test_dataset():
     q = datapack['q']
     sim = similarity('Robotiq', 0.9)
     c = sim.similarity_idx(315)
-    # data_viz("meshjoint", (obj_vert, obj_face, None, h.squeeze().cpu().numpy()))
-    # data_viz("meshjoint", (obj_vert, obj_face, None, r.squeeze().cpu().numpy()))
-    # data_viz("meshmesh", (hand_vert, hand_face, obj_vert, obj_face, None))
-    # data_viz("mesh", ())
 
-def test_opt():
-    result = result_loader('gh', 'sim', 'gt')
-    # # result.load_qtime_robot()
-    # # result.load_fctime_robot()
-    # # result.plot_fc_time()
-    # result.load_SR_mu()
-    # result.plot_SR_mu()
-    # result = result_loader('gh', 'opt','gt')
-    # result.load_qtime_robot()
-    # result.load_fctime_robot()
-    # result.plot_fc_time()
-    # result.load_SR_mu()
-    result.plot_SR_mu()
-    # result.plot_only_qtime()
-    # result.plot_SR_obj()
+
+
 def main_():
     chamfer_score_nv = {}
     for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
@@ -970,50 +953,6 @@ def save_dict_to_json(dict_of_arrays, file_path):
 
 
 def evaluate():
-    # chamfer_score_nv = {}
-    # for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
-    #     for mu in [0.1,0.3,0.5,0.7,0.9]:
-    #         sim = similarity(robot, mu, device='cpu', exp_name='genhand')
-    #         score = sim.run_gf_residual()
-    #         residual_tensor = torch.tensor(score)
-    #         non_nan_tensor = residual_tensor[~torch.isnan(residual_tensor)]
-    #         chamfer_score_nv[(robot, mu)] = non_nan_tensor.numpy()
-    
-    # save_dict_to_json(chamfer_score_nv, 'gf_residual_gh.json')
-    
-    # chamfer_score_nv_2 = {}
-    # for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
-    #     for mu in [0.1,0.3,0.5,0.7,0.9]:
-    #         sim = similarity(robot, mu, device='cpu', exp_name='nv')
-    #         score = sim.run_gf_residual_nv()
-    #         residual_tensor = torch.tensor(score)
-    #         non_nan_tensor = residual_tensor[~torch.isnan(residual_tensor)]
-    #         chamfer_score_nv_2[(robot, mu)] = non_nan_tensor.numpy()
-    
-    # save_dict_to_json(chamfer_score_nv_2, 'gf_residual_nv.json')
-    
-    # chamfer_score_nv_3 = {}
-    # for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
-    #     for mu in [0.1,0.3,0.5,0.7,0.9]:
-    #         sim = similarity(robot, mu, device='cpu', exp_name='genhand')
-    #         score = sim.run_sdf_residual()
-    #         residual_tensor = torch.tensor(score)
-    #         non_nan_tensor = residual_tensor[~torch.isnan(residual_tensor)]
-    #         chamfer_score_nv_3[(robot, mu)] = non_nan_tensor.numpy()
-    
-    # save_dict_to_json(chamfer_score_nv_3, 'sdf_residual_gh.json')
-    
-    # chamfer_score_nv_4 = {}
-    # for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
-    #     for mu in [0.1,0.3,0.5,0.7,0.9]:
-    #         sim = similarity(robot, mu, device='cpu', exp_name='nv')
-    #         score = sim.run_sdf_residual()
-    #         residual_tensor = torch.tensor(score)
-    #         non_nan_tensor = residual_tensor[~torch.isnan(residual_tensor)]
-    #         chamfer_score_nv_4[(robot, mu)] = non_nan_tensor.numpy()
-    
-    # save_dict_to_json(chamfer_score_nv_4, 'sdf_residual_nv.json')
-    
     
     chamfer_score_nv_5 = {}
     for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
@@ -1244,175 +1183,7 @@ def draw_sdf_residual_single():
 
     plt.show()
 
-def main():
-    pass
-    # chamfer_score = {}
-    # for robot in ['Robotiq', 'Shadow', 'Allegro', 'Barrett']:
-    #     for mu in [0.3, 0.7, 0.9]:
-    #         sim = similarity(robot, mu, device='cuda:0')
-    #         chamfer_score[(robot)] = sim.run_similarity()
-    # print(chamfer_score)
-    
 
-    # robot_list_method1 = {}
-    # robot_list_method2 = {}
-    # error_margin_method1 = {}
-    # error_margin_method2 = {}
-            
-    # for robot in ['Shadow', 'Allegro', 'Barrett', 'Robotiq']:
-    #     robot_list_method1[robot] = []
-    #     robot_list_method2[robot] = []
-    #     error_margin_method1[robot] = []
-    #     error_margin_method2[robot] = []
-
-    #     for obj in [0.9]:  # Only consider mu = 0.9
-    #         # Method 1
-    #         mean_val_method1 = np.mean(chamfer_score_nv[(robot)])
-    #         std_val_method1 = np.std(chamfer_score_nv[(robot)])
-    #         robot_list_method1[robot].append(mean_val_method1)
-    #         error_margin_method1[robot].append(std_val_method1)
-
-    #         # Method 2 (assuming self.SR_2 contains data for method 2)
-    #         mean_val_method2 = np.mean(chamfer_score_nv_2[(robot)])  # Assuming this is for method 2
-    #         std_val_method2 = np.std(chamfer_score_nv_2[(robot)])
-    #         robot_list_method2[robot].append(mean_val_method2)
-    #         error_margin_method2[robot].append(std_val_method2)   
-                         
-    # robots = ['Shadow', 'Allegro', 'Barrett', 'Robotiq']
-    # labels = ['5-finger', '4-finger', '3-finger', '2-finger']
-    # x = np.arange(len(robots))
-
-    # fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(7, 3.5), dpi=300,
-    #                                gridspec_kw={'height_ratios': [2, 1]})
-    # fig.subplots_adjust(hspace=0.05)  # Adjust space between axes
-    
-    # # Plot Method 2 (Baseline) on ax1 (lower range)
-    # method2_mean = [robot_list_method2[robot][0] for robot in robots]
-    # method2_error = [error_margin_method2[robot][0] for robot in robots]
-
-    # ax1.plot(x, method2_mean, label="Baseline", color='#CA6702', linewidth=2)
-    # ax1.fill_between(x, np.array(method2_mean) - np.array(method2_error), np.array(method2_mean) + np.array(method2_error), color='#CA6702', alpha=0.2, edgecolor=None)
-    
-    # # ax1.set_ylabel('Net Wrench Residual (Baseline)', color='#CA6702')
-    # ax1.tick_params(axis='y', labelcolor='#CA6702')
-    # ax1.set_xticklabels([])  # Remove x-ticklabels from the upper axis
-    # # ax1.set_xlabel('')
-    # # ax1.tick_params(axis='x', labelbottom=False)
-    # # Plot Method 1 (Ours) on ax2 (higher range)
-    # method1_mean = [robot_list_method1[robot][0] for robot in robots]
-    # method1_error = [error_margin_method1[robot][0] for robot in robots]
-
-    # ax2.plot(x, method1_mean, label="Ours", color='#005F73', linewidth=2)
-    # ax2.fill_between(x, np.array(method1_mean) - np.array(method1_error), np.array(method1_mean) + np.array(method1_error), color='#005F73', alpha=0.2, edgecolor=None)
-    
-    # # ax2.set_ylabel('Net Wrench Residual (Ours)', color='#005F73')
-    # ax2.tick_params(axis='y', labelcolor='#005F73')
-    # ax1.legend(loc='best')
-    # ax2.legend(loc='best')
-    # # Set x-axis labels
-    # ax2.set_xticks(x)
-    # ax2.set_xticklabels(labels)
-
-    # # Set the limits for the axes
-    # ax1.set_ylim(3, 35)  # Higher values (Baseline)
-    # ax2.set_ylim(0, 2)  # Lower values (Ours)
-
-    # # Add a gap between the axes to simulate a broken axis
-    # # ax1.set_xticklabels([])  # Remove x-ticklabels from the upper axis
-    # # ax1.set_xlabel('')
-    # # ax1.set_xticks(x)
-
-    # # ax2.set_xlabel('Robot Types')
-    # ax1.spines.bottom.set_visible(False)
-    # ax2.spines.top.set_visible(False)
-    # ax1.xaxis.set_ticks_position('none')  # no ticks on the upper axis
-
-    # ax1.tick_params(labeltop=False)  # don't put tick labels at the top
-    # ax2.xaxis.tick_bottom()
-    # plt.setp(ax2.get_yticklabels()[2], visible=False)  # Hide the last y-tick label
-    # plt.setp(ax1.get_yticklabels()[0], visible=False)  # Hide the last y-tick label
-    # plt.setp(ax2.get_yticklines()[4], visible=False)  # Hide the last y-tick label
-    # plt.setp(ax1.get_yticklines()[0], visible=False)  # Hide the last y-tick label
-    # # Add a global title for the whole figure
-    # fig.suptitle('Net wrench residual over Robots (mu = 0.9)', fontsize=12)
-    # fig.text(0.01, 0.5, 'Net Wrench Residual', ha='center', va='center', rotation='vertical', fontsize=12)
-
-    # # Add a line to indicate the break
-    # d = .5  # Proportion of vertical to horizontal extent of the slanted line
-    # kwargs = dict(marker=[(-1, -d), (1, d)], markersize=12,
-    #               linestyle="none", color='k', mec='k', mew=1, clip_on=False)
-
-    # # Slanted lines between ax1 and ax2
-    # ax1.plot([0, 1], [0, 0], transform=ax1.transAxes, **kwargs)
-    # ax2.plot([0, 1], [1, 1], transform=ax2.transAxes, **kwargs)
-    # fig.tight_layout()
-
-    # plt.savefig("SR_mu_comparison_0.9_Net_wrench_residual.png", dpi=300, facecolor='#FFFFFF', edgecolor='none')
-
-    # plt.show()
-
-    ############################################################################
-    
-    # fig, ax = plt.subplots(figsize=(7, 3.5), dpi=300)
-
-    # # Plot Method 1 as a line with shaded error band
-    # method1_mean = [robot_list_method1[robot][0] for robot in robots]
-    # method1_error = [error_margin_method1[robot][0] for robot in robots]
-
-    # ax.plot(x, method1_mean, label="Ours", color='#005F73', linewidth=2)
-    # ax.fill_between(x, np.array(method1_mean) - np.array(method1_error), np.array(method1_mean) + np.array(method1_error), color='#005F73', alpha=0.2, edgecolor=None)
-
-    # # Plot Method 2 as a line with shaded error band
-    # method2_mean = [robot_list_method2[robot][0] for robot in robots]
-    # method2_error = [error_margin_method2[robot][0] for robot in robots]
-
-    # ax.plot(x, method2_mean, label="Baseline", color='#CA6702', linewidth=2)
-    # ax.fill_between(x, np.array(method2_mean) - np.array(method2_error), np.array(method2_mean) + np.array(method2_error), color='#CA6702', alpha=0.2, edgecolor=None)
-
-    # # Set labels and title
-    # ax.set_ylabel('Net wrench residual')
-    # ax.set_title('Net wrench residual over Robots (mu = 0.9)')
-    # ax.set_xticks(x)  # Set the x-ticks at the robot positions
-    # ax.set_xticklabels(labels)  # Use robot names as x-axis labels
-    # ax.legend(loc='best')
-
-    # fig.tight_layout()
-    # plt.savefig("SR_mu_comparison_0.9_Net wrench_residual.png", dpi=300, facecolor='#FFFFFF', edgecolor='none')
-
-    # plt.show()
-            #chamfer_score_nv[(robot)] = residual_tensor.argmax()
-    #print(chamfer_score_nv)
-    #####################################################################################
-    # chamfer_score_nv = {}
-    # robot = 'Robotiq'
-    # mu = 0.9
-    # sim = similarity(robot, mu, device='cuda:1', exp_name='genhand')
-    # chamfer_score_nv[(robot)] = sim.run_sdf_residual_test()
-    # print(chamfer_score_nv)
-    
-    # robots = ['Shadow', 'Allegro', 'Barrett', 'Robotiq']
-    # labels = ['ours', 'dexycb']
-    # robot_data = {robot: [np.mean(chamfer_score[robot]), np.mean(chamfer_score_nv([robot]))] for robot in robots}
-    # error_data = {robot: [stats.sem(chamfer_score[robot]),stats.sem(chamfer_score_nv[robot])] for robot in robots}
-    # x = np.arange(len(robots))  # X positions for robots
-    # width = 0.3  # Bar width
-    # fig, ax = plt.subplots(figsize=(7, 7/2), dpi=300)
-    # color = ['#005F73']
-    # # Plot bars for each time category
-    # for i, label in enumerate(labels):
-    #     cham = [robot_data[robot][i] for robot in robots]
-    #     error = [error_data[robot][i] for robot in robots]
-    #     ax.bar(x + i * width, cham, width, label=label, yerr=error, capsize=5, color=colors[i])
-    # ax.set_ylabel('Chamfer Distance')
-    # ax.set_title('Chamfer Distance over Robots')
-    # ax.set_xticks(x + width / 2)  # Center the tick labels
-    # ax.set_xticklabels(robots)  # Set x-axis labels to robot names
-    # fig.tight_layout()
-    # plt.ylim(0, max([np.mean(chamfer_score[robot]) for robot in robots]) + max([stats.sem(chamfer_score[robot]) for robot in robots]) + 2)
-    # plt.savefig("chamfer.png", dpi=300, facecolor='#FFFFFF', edgecolor='none')
-    # plt.show()
-    # # sim = similarity('Shadow', 0.7, exp_name='nv', device='cuda:0')
-    # # print(sim.run_similarity())
 def plot_success_rate_with_error():
     # Generate some random data for testing
     robots = ['Shadow', 'Allegro', 'Barrett', 'Robotiq']
@@ -1462,12 +1233,6 @@ def plot_success_rate_with_error():
     ax1.set_ylim(3, 30)  # Higher values (Baseline)
     ax2.set_ylim(0, 0.8)  # Lower values (Ours)
 
-    # Add a gap between the axes to simulate a broken axis
-    # ax1.set_xticklabels([])  # Remove x-ticklabels from the upper axis
-    # ax1.set_xlabel('')
-    # ax1.set_xticks(x)
-
-    # ax2.set_xlabel('Robot Types')
     ax1.spines.bottom.set_visible(False)
     ax2.spines.top.set_visible(False)
     ax1.xaxis.set_ticks_position('none')  # no ticks on the upper axis
@@ -1548,126 +1313,5 @@ def draw_dist_residual_single():
     plt.show()
 
 if __name__ == '__main__':
-    # plot_success_rate_with_error()
-    # test_dataset()
-    # draw_dist_residual_single()
-    # evaluate()
-    # test_opt()
     draw_gf_residual()
-    """
-    Note GenHand:
-    {('Shadow', 0.1): tensor(4.0793, dtype=torch.float64), 
-    ('Shadow', 0.3): tensor(4.1053, dtype=torch.float64), 
-    ('Shadow', 0.5): tensor(4.1060, dtype=torch.float64), 
-    ('Shadow', 0.7): tensor(4.1099, dtype=torch.float64), 
-    ('Shadow', 0.9): tensor(4.0908, dtype=torch.float64), 
-    ('Allegro', 0.1): tensor(4.5979, dtype=torch.float64), 
-    ('Allegro', 0.3): tensor(4.6089, dtype=torch.float64), 
-    ('Allegro', 0.5): tensor(4.5955, dtype=torch.float64), 
-    ('Allegro', 0.7): tensor(4.5816, dtype=torch.float64),
-    ('Allegro', 0.9): tensor(4.5467, dtype=torch.float64), 
-    ('Barrett', 0.1): tensor(4.7647, dtype=torch.float64), 
-    ('Barrett', 0.3): tensor(4.7732, dtype=torch.float64), 
-    ('Barrett', 0.5): tensor(4.7772, dtype=torch.float64), 
-    ('Barrett', 0.7): tensor(4.7805, dtype=torch.float64), 
-    ('Barrett', 0.9): tensor(4.7646, dtype=torch.float64), 
-    {('Robotiq', 0.1): tensor(5.4060, dtype=torch.float64), 
-    ('Robotiq', 0.3): tensor(5.3954, dtype=torch.float64), 
-    ('Robotiq', 0.5): tensor(5.4133, dtype=torch.float64), 
-    ('Robotiq', 0.7): tensor(5.3617, dtype=torch.float64), 
-    ('Robotiq', 0.9): tensor(5.4065, dtype=torch.float64)}
 
-
-    NV:
-    {('Shadow', 0.1): tensor(4.1046, dtype=torch.float64), 
-    ('Shadow', 0.3): tensor(4.1013, dtype=torch.float64), 
-    ('Shadow', 0.5): tensor(4.1000, dtype=torch.float64), 
-    ('Shadow', 0.7): tensor(4.1353, dtype=torch.float64), 
-    ('Shadow', 0.9): tensor(4.0808, dtype=torch.float64), 
-    ('Allegro', 0.1): tensor(4.5830, dtype=torch.float64), 
-    ('Allegro', 0.3): tensor(4.5981, dtype=torch.float64), 
-    ('Allegro', 0.5): tensor(4.6000, dtype=torch.float64), 
-    ('Allegro', 0.7): tensor(4.5877, dtype=torch.float64), 
-    ('Allegro', 0.9): tensor(4.5715, dtype=torch.float64), 
-    ('Barrett', 0.1): tensor(4.7488, dtype=torch.float64), 
-    ('Barrett', 0.3): tensor(4.7637, dtype=torch.float64), 
-    ('Barrett', 0.5): tensor(4.7144, dtype=torch.float64), 
-    ('Barrett', 0.7): tensor(4.7794, dtype=torch.float64), 
-    ('Barrett', 0.9): tensor(4.7628, dtype=torch.float64), 
-    {('Robotiq', 0.1): tensor(5.3792, dtype=torch.float64),
-    ('Robotiq', 0.3): tensor(5.3697, dtype=torch.float64), 
-    ('Robotiq', 0.5): tensor(5.3394, dtype=torch.float64), 
-    ('Robotiq', 0.7): tensor(5.3931, dtype=torch.float64), 
-    ('Robotiq', 0.9): tensor(5.3706, dtype=torch.float64)}
-
-
-
-    """
-    # import numpy as np
-    # import matplotlib.pyplot as plt
-
-    # # 🔹 Define 5 categories (Y-axis labels)
-    # categories = ['0.1', '0.3', '0.5', '0.7', '0.9']
-
-    # # 🔹 Number of bars per category
-    # num_bars = 8
-
-    # # 🔹 Generate random data (8 bars for each of the 5 categories)
-    # # data = np.random.rand(len(categories), num_bars) * 10  # Shape (5, 8)
-    
-    # baseset = {'Shadow': [0.10309278350515463, 0.31958762886597936, 0.4791666666666667, 0.7938144329896907, 0.845360824742268],
-    #            'Allegro': [0.09511568123393316, 0.28974358974358977, 0.5461538461538461, 0.7628865979381443, 0.8560411311053985],
-    #            'Barrett': [0.09948979591836735, 0.32908163265306123, 0.5586734693877551, 0.7061855670103093, 0.8132992327365729],
-    #            'Robotiq': [0.0663265306122449, 0.17857142857142858, 0.5612244897959183, 0.6930946291560103, 0.7346938775510204],
-    #             'Shadow_nv':  [0.07216494845360824, 0.2708333333333333, 0.3917525773195876, 0.59375, 0.6391752577319587],
-    #             'Allegro_nv': [0.053164556962025315, 0.17721518987341772, 0.3848101265822785, 0.6227848101265823, 0.748730964467005],
-    #             'Barrett_nv': [0.11645569620253164, 0.369620253164557, 0.5645569620253165, 0.7316455696202532, 0.8075949367088607],
-    #             'Robotiq_nv': [0.002544529262086514, 0.04580152671755725, 0.089058524173028, 0.15012722646310434, 0.22391857506361323]
-    # }
-    
-    # data = []
-    # for i in range(5):
-    #     data.append([baseset['Shadow'][i],  baseset['Shadow_nv'][i], 
-    #                  baseset['Allegro'][i], baseset['Allegro_nv'][i],
-    #                  baseset['Barrett'][i], baseset['Barrett_nv'][i],
-    #                  baseset['Robotiq'][i], baseset['Robotiq_nv'][i]])
-    # data = np.array(data)
-    
-    # # 🔹 Bar width & Y-axis positions
-    # y = np.arange(len(categories))  # Positions for categories
-    # bar_width = 0.1  # Controls spacing between bars
-
-    # # 🔹 Colors for each bar group
-    # colors = plt.cm.get_cmap('tab10', num_bars).colors  # Unique color for each bar
-
-    # # 🔹 Create Figure
-    # fig, ax = plt.subplots(figsize=(10, 6))
-
-    # # 🔹 Plot each group of 8 bars
-    # for i in range(num_bars):
-    #     ax.barh(y + (i - num_bars/2) * bar_width, data[:, i], height=bar_width, color=colors[i], label=f'Bar {i+1}')
-
-    # # 🔹 Formatting
-    # ax.set_yticks(y)
-    # ax.set_yticklabels(categories)
-    # ax.set_xlabel("Frictional Coefficient")
-    # ax.set_title("Success rate over Frictional Coefficient")
-    # ax.legend(ncol=4, fontsize=8, loc="upper right")
-
-    # plt.show()
-
-    """
-    single:
-        {'Shadow': [nan, nan, nan, nan, 0.6979166666666666], 'Allegro': [nan, nan, nan, nan, 0.6701030927835051], 'Barrett': [nan, nan, nan, nan, 0.6597938144329897], 'Robotiq': [nan, nan, nan, nan, 0.6082474226804123]}
-
-    genhand contact:
-    {'Robotiq': tensor(0.0105), 'Shadow': tensor(0.0031), 'Allegro': tensor(0.0031), 'Barrett': tensor(0.0028)}
-    
-    {'Robotiq': tensor(0.0156), 'Shadow': tensor(0.0181), 'Allegro': tensor(0.0182), 'Barrett': tensor(0.0139)}
-    gf
-    {'Robotiq': tensor(4.4439), 'Shadow': tensor(26.7702), 'Allegro': tensor(16.8093), 'Barrett': tensor(10.1775)}
-   
-    {'Robotiq': tensor(0.1789), 'Shadow': tensor(0.4492), 'Allegro': tensor(0.4206), 'Barrett': tensor(0.2972)}
-
-    
-      """

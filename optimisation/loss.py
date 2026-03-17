@@ -1,6 +1,9 @@
 import numpy as np
 import torch
-import utils as mb
+try:
+    from . import utils as mb
+except ImportError:
+    import optimisation.utils as mb
 
 class FCLoss:
     def __init__(self, device='cuda'):
@@ -42,7 +45,7 @@ class FCLoss:
         G = torch.stack([I, xi_cross], 1).reshape([B, 6, 3*N])
         return G
     
-    def loss_8a(self, G):
+    def lin_ind(self, G):
         """
         G: B x 6 x 3N
         """
@@ -55,7 +58,7 @@ class FCLoss:
         result = torch.sum(rnev * rnev, 1)
         return result
     
-    def loss_8b(self, f, G): 
+    def net_wrench(self, f, G): 
         """
         G: B x 6 x 3N
         f: B x N x 3
@@ -63,7 +66,7 @@ class FCLoss:
         B = f.shape[0]
         N = f.shape[1]
         return self.relu(self.l2_norm(torch.matmul(G, f.reshape(B, 3*N, 1))))
-    
+
     def inter_fc(self, w):
         # w: B x N x 4
         B, N, d = w.shape
@@ -92,6 +95,8 @@ class FCLoss:
 
         Return the weights of the 4-edge friction pyramid
         """
+        # Only cone direction should depend on surface normal; magnitude must not.
+        normal = torch.nn.functional.normalize(normal, p=2, dim=-1, eps=1e-8)
         B = normal.shape[0]
         N = normal.shape[1]
         # construct 4-edge friction pyramid 
@@ -134,12 +139,12 @@ class FCLoss:
     
     def loss_G(self, x,f):
         G = self.x_to_G(x)
-        l8a = self.loss_8a(G)
-        l8b = self.loss_8b(f, G)
+        lin_ind = self.lin_ind(G)
+        net_wrench = self.net_wrench(f, G)
 
         # l8c = self.loss_8c(normal)
         # l8d = self.dist_loss(obj_code, x)
-        return l8a, l8b
+        return lin_ind, net_wrench
 
 
     

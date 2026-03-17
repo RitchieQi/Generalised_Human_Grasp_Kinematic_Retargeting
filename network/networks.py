@@ -284,7 +284,7 @@ def kinematic_embedding(obj_point_latent, recon_scale, input_points, num_points_
 
     xyz = (input_points * 2 / recon_scale)
     obj_trans = pose_results['global_trans']
-    homo_xyz_obj = homoify(xyz)
+    homo_xyz_obj = homoify(xyz) #cude
     inv_obj_trans = inv_func(obj_trans)
     inv_homo_xyz_obj = torch.matmul(inv_obj_trans, homo_xyz_obj.transpose(2, 1)).transpose(2, 1)
     inv_xyz_obj = dehomoify(inv_homo_xyz_obj)

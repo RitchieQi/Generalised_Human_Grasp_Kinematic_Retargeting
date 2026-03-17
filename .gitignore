@@ -13,9 +13,13 @@ urdf/*
 
 #log
 *.txt
+!requirements.txt
 
 #model
 *.tar
+
+# local workflow ignores
+optimisation/viz_tool.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -237,10 +241,7 @@ __marimo__/
 # Project-generated artifacts (large / unnecessary for GitHub)
 network/ckpt/
 network/logs/
-network/obj_pose_results/
-network/hand_pose_results/
-network/mesh/
-network/mesh_hand/
+network/results/
 ckpt/
 checkpoints/
 logs/
@@ -258,3 +259,15 @@ wandb/
 *.tar.gz
 *.tgz
 *.7z
+
+# Dataset publishing policy:
+# - ignore external/local dataset links
+# - allow committing the lightweight sample dataset folder
+dataset/_data
+dataset/_data/
+data_
+data_/
+dataset/data_
+dataset/data_/
+!dataset/data/
+!dataset/data/**

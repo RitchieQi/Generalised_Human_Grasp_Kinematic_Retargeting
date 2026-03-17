@@ -9,9 +9,26 @@ from dex_ycb_toolkit.dex_ycb import DexYCBDataset
 from scipy.spatial.transform import Rotation as R
 from abc import ABC, abstractmethod
 import os
-from bullet_base import PybulletBase
-from optimisation_tmp.utils import rodrigues, euler_to_mat
+try:
+    from .bullet_base import PybulletBase
+    from .utils import rodrigues, euler_to_mat
+except ImportError:
+    from bullet_base import PybulletBase
+    from utils import rodrigues, euler_to_mat
 import torch
+
+
+def _urdf_root():
+    repo_root = osp.abspath(osp.join(osp.dirname(__file__), ".."))
+    candidates = [
+        osp.join(repo_root, "model", "urdf"),
+        osp.join(repo_root, "urdf"),
+    ]
+    for path in candidates:
+        if osp.isdir(path):
+            return path
+    return candidates[-1]
+
 
 class robot(ABC):
     def __init__(
@@ -158,7 +175,7 @@ class robot(ABC):
 class shadow(robot):
     def set_robot_info(self) -> None:
          self.body_name = "Shadow"
-         self.urdf_path = osp.join(osp.dirname(__file__), '..', '..', '..', 'model', 'urdf', 'sr_description','urdf','shadow_hand_pybullet.urdf')
+         self.urdf_path = osp.join(_urdf_root(), 'sr_description', 'urdf', 'shadow_hand_pybullet.urdf')
         #  self.base_position = position
         #  self.base_orientation = orentation
          #self.endeffect =[7, 12, 17, 23, 29]
@@ -171,7 +188,7 @@ class shadow(robot):
 class allegro(robot):
     def set_robot_info(self) -> None:
         self.body_name = "Allegro"
-        self.urdf_path = osp.join(osp.dirname(__file__), '..', '..', '..', 'model', 'urdf', 'allegro_hand','allegro_hand_description_right.urdf')
+        self.urdf_path = osp.join(_urdf_root(), 'allegro_hand', 'allegro_hand_description_right.urdf')
         self.endeffect = []
         self.pre_grasp = np.array([-0.2, 0.0, -0.2])
 
@@ -182,7 +199,7 @@ class allegro(robot):
 class barrett(robot):
     def set_robot_info(self) -> None:
         self.body_name = "Barrett"
-        self.urdf_path = osp.join(osp.dirname(__file__), '..', '..', '..', 'model', 'urdf', 'barrett_adagrasp','model.urdf')
+        self.urdf_path = osp.join(_urdf_root(), 'barrett_adagrasp', 'model.urdf')
         self.endeffect = []
         self.pre_grasp = np.array([0.0, 0.0, -0.2]) 
         self.init_joint = [0.0]*8
@@ -192,7 +209,7 @@ class barrett(robot):
 class robotiq(robot):
     def set_robot_info(self) -> None:
         self.body_name = "Robotiq"
-        self.urdf_path = osp.join(osp.dirname(__file__), '..', '..', '..', 'model', 'urdf', 'robotiq_arg85','urdf','robotiq_arg85_description.urdf')
+        self.urdf_path = osp.join(_urdf_root(), 'robotiq_arg85', 'urdf', 'robotiq_arg85_description.urdf')
         # self.urdf_path = osp.join(osp.dirname(__file__), '..', '..', '..',  'model', 'urdf', 'robotiq_85v2', 'robotiq_2f_85_v3.urdf')
        
         self.endeffect = []

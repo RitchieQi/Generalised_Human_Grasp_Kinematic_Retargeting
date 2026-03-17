@@ -3,17 +3,16 @@ import pytorch_volumetric as pv
 import numpy as np
 import trimesh as tm
 import torch
-from optimisation_tmp.robot import human
+from optimisation.robot import human
 from torch.autograd import Function
-from optimisation_tmp.loss import FCLoss
-from scipy.spatial import ConvexHull
+from optimisation.loss import FCLoss
 from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, silhouette_samples
 from typing import List
 from plotly import graph_objects as go
 from torch.nn.functional import relu
-import optimisation_tmp.icp as icp
+import optimisation.icp as icp
 from sklearn.decomposition import PCA
 import hdbscan
 class SDFLayer(Function):
@@ -30,7 +29,13 @@ class SDFLayer(Function):
         sdf_val: N x 1
         sdf_grad: N x 3
         """
-        sdf_val, sdf_grad = query_function(query_points)
+        # Custom autograd forward runs with grad tracking disabled by default.
+        # Enable grad here so network-based SDF backends can differentiate w.r.t. query points.
+        with torch.enable_grad():
+            points_for_query = query_points
+            if not points_for_query.requires_grad:
+                points_for_query = query_points.clone().detach().requires_grad_(True)
+            sdf_val, sdf_grad = query_function(points_for_query)
         ctx.save_for_backward(sdf_grad, sdf_val)
         return sdf_val
 
@@ -52,7 +57,11 @@ class object_sdf():
                  obj_mesh = None,
                  hand_mesh = None,
                  device = "cuda", 
-                 robot_contact = None):
+                 robot_contact = None,
+                 sdf_backend = "mesh",
+                 sdf_query_fn = None,
+                 obj_scale = 1.0,
+                 network_recon_scale = 6.2):
         self.device = device
         self.hand_model = human(device=device)
         self.loss = FCLoss(device=device)
@@ -60,6 +69,17 @@ class object_sdf():
         self.contact_threshold = contact_threshold
         self.cosine_threshold = cosine_threshold    
         self.robot_contact = robot_contact
+        self.sdf_backend = sdf_backend
+        self.sdf_query_fn = sdf_query_fn
+        self.mesh_sdf = None
+        self.obj_scale = torch.tensor(
+            [float(obj_scale)], dtype=torch.float32, device=self.device
+        )
+        self.network_sdf_unit_scale = torch.tensor(
+            [2.0 / float(network_recon_scale)], dtype=torch.float32, device=self.device
+        )
+        # self.network_sdf_unit_scale = torch.tensor([1.0], dtype=torch.float32, device=self.device)
+        self.network_query_offset = torch.zeros((1, 1, 3), dtype=torch.float32, device=self.device)
         self.obj_vert = None
         self.obj_face = None
         self.obj_points = None
@@ -68,6 +88,97 @@ class object_sdf():
         self.contact_target = None
         if obj_mesh is not None and hand_mesh is not None:
             self.reset(obj_mesh, hand_mesh, robot_contact)
+
+    def set_sdf_backend(self, backend="mesh", sdf_query_fn=None):
+        self.sdf_backend = backend
+        if sdf_query_fn is not None:
+            self.sdf_query_fn = sdf_query_fn
+
+    def set_network_query_offset(self, offset):
+        if offset is None:
+            self.network_query_offset = torch.zeros((1, 1, 3), dtype=torch.float32, device=self.device)
+            return
+        if isinstance(offset, torch.Tensor):
+            t = offset.to(device=self.device, dtype=torch.float32)
+        else:
+            t = torch.tensor(offset, dtype=torch.float32, device=self.device)
+        if t.dim() == 1:
+            t = t.view(1, 1, 3)
+        elif t.dim() == 2:
+            t = t.view(1, t.shape[0], 3)
+        self.network_query_offset = t
+
+    def _fallback_contact_target(self):
+        """
+        Fallback when clustering cannot find valid contact points.
+        Uses MANO fingertips as a stable default target set.
+        """
+        fingertip = self.hand_model.get_fingertips()
+        if fingertip.dim() == 3:
+            fingertip = fingertip.squeeze(0)
+        if fingertip.dim() != 2 or fingertip.size(-1) != 3:
+            raise RuntimeError("Unable to build fallback contact target from fingertips.")
+        count = min(self.robot_contact, fingertip.size(0))
+        self.contact_target = fingertip[:count].to(self.device)
+        self.hand_contact = self.contact_target.size(0)
+        return self.contact_target
+
+    def _dispatch_sdf(self, query_points):
+        def _normalize_sdf_shape(sdf_val):
+            if isinstance(sdf_val, torch.Tensor) and sdf_val.dim() > 0 and sdf_val.shape[-1] == 1:
+                return sdf_val.squeeze(-1)
+            return sdf_val
+
+        scale = torch.clamp(self.obj_scale, min=1e-6)
+        use_network = self.sdf_backend == "network"
+        if use_network:
+            if self.sdf_query_fn is None:
+                raise ValueError("sdf_backend='network' requires sdf_query_fn.")
+            if query_points.dim() == 2:
+                offset = self.network_query_offset.view(1, 3)
+            else:
+                offset = self.network_query_offset
+            points_scaled = (query_points + offset) / scale
+            points_for_query = points_scaled
+            detach_output = False
+            if not points_for_query.requires_grad:
+                points_for_query = points_scaled.clone().detach().requires_grad_(True)
+                detach_output = True
+
+            out = self.sdf_query_fn(points_for_query)
+            if isinstance(out, tuple) and len(out) == 2:
+                sdf_val = _normalize_sdf_shape(out[0]) * scale * self.network_sdf_unit_scale
+                # out[1] is d(raw_sdf)/d(points_scaled); this is already the gradient
+                # direction for scaled-back sdf w.r.t. original query points.
+                # Multiply by unit conversion to keep value/gradient consistent.
+                sdf_grad = out[1] * self.network_sdf_unit_scale
+                if detach_output:
+                    return sdf_val.detach(), sdf_grad.detach()
+                return sdf_val, sdf_grad
+
+            sdf_val = out
+            if sdf_val.dim() == points_for_query.dim() - 1:
+                sdf_val = sdf_val.unsqueeze(-1)
+            grad = torch.autograd.grad(
+                outputs=sdf_val.sum(),
+                inputs=points_for_query,
+                retain_graph=True,
+                create_graph=True,
+                allow_unused=False,
+            )[0]
+            sdf_val = _normalize_sdf_shape(sdf_val) * scale * self.network_sdf_unit_scale
+            grad = grad * self.network_sdf_unit_scale
+            if detach_output:
+                return sdf_val.detach(), grad.detach()
+            return sdf_val, grad
+
+        if self.mesh_sdf is None:
+            raise ValueError("Mesh SDF is not initialized. Call reset() first.")
+        points_scaled = query_points / scale
+        sdf_val, sdf_grad = self.mesh_sdf(points_scaled)
+        # mesh_sdf gradient is in scaled query space; this equals gradient of
+        # scaled-back sdf in original query space.
+        return _normalize_sdf_shape(sdf_val) * scale, sdf_grad
     
     def reset(self, 
               obj_mesh:List[torch.Tensor], 
@@ -75,7 +186,16 @@ class object_sdf():
               joints:torch.Tensor):
         self.obj_vert = obj_mesh[0].to(self.device)
         self.hand_model.load_hand_mesh(mesh_v = hand_mesh[0], mesh_f = hand_mesh[1], joints = joints)
-        self.pv_sdf = pv.MeshSDF(pv.MeshObjectFactory(mesh_name=None, preload_mesh=dict(vertices=obj_mesh[0].squeeze().cpu().numpy(), faces=obj_mesh[1].squeeze().cpu().numpy()))) #the backend open3d is not compatible with cuda
+        self.mesh_sdf = pv.MeshSDF(
+            pv.MeshObjectFactory(
+                mesh_name=None,
+                preload_mesh=dict(
+                    vertices=obj_mesh[0].squeeze().cpu().numpy(),
+                    faces=obj_mesh[1].squeeze().cpu().numpy(),
+                ),
+            )
+        )  # the backend open3d is not compatible with cuda
+        self.pv_sdf = self._dispatch_sdf
         self.contact_target = None
         self.hand_contact = None
         self.obj_face = obj_mesh[1].to(self.device)
@@ -363,44 +483,20 @@ class object_sdf():
             for clabel in torch.unique(clabel_n):
                 self.sub_contact.append(contact_group_o[clabel_n == clabel])
                 self.sub_contact_normal.append(contact_normal_[clabel_n == clabel])
-                
-        print("contact target", self.contact_target, self.contact_target.size())
-        print("fingertip", fingertip, fingertip.size())
+
         self.contact_target = (self.contact_target * torch.norm(contact_points_c, dim=-1).max()) + contact_points.mean(dim=0)
         indices = icp.nn_reg(self.contact_target.cpu().detach().numpy(), fingertip.squeeze().cpu().detach().numpy())
         indices_2 = icp.nn_reg(fingertip.squeeze().cpu().detach().numpy(), self.contact_target.cpu().detach().numpy())
-        print("indices", indices)
-        print("indices_2", indices_2)
-        # print("indices", indices)
-        # print("contact target before", self.contact_target, self.contact_target.size())
-        # indices = torch.tensor(indices_2, dtype=torch.long).to(self.device)
-        # reverse_indices = torch.empty_like(indices).to(self.device)
-        # print("reverse_indices", reverse_indices)
-        # reverse_indices[indices] = torch.arange(indices.size(0)).to(self.device)
-        # print("reverse_indices", reverse_indices)
-        # test_indices = reorder_indices(indices)
-        # print("test_indices", test_indices)
+
+
         indices = torch.tensor(indices_2, dtype=torch.long).to(self.device)
         reverse_indices = reorder_indices(indices)
         self.contact_target = self.contact_target[reverse_indices]
-        # print("contact target", self.contact_target, self.contact_target.size())
-        # print("joint", fingertip)
+
 
     def hand_contact_cluster_hdbscan(self):
 
         def filter_labels_by_threshold(labels, indices, threshold=4):
-            """
-            Filters out labels that appear less than `threshold` times and removes the corresponding elements in indices.
-
-            Parameters:
-                labels (np.ndarray): Array of labels.
-                indices (np.ndarray): Array of corresponding indices.
-                threshold (int): Minimum occurrences required to keep a label.
-
-            Returns:
-                np.ndarray: Filtered labels.
-                np.ndarray: Filtered indices.
-            """
             unique_labels, counts = np.unique(labels, return_counts=True)
             if len(unique_labels) == 1:
                 return labels, indices  # No filtering needed
@@ -415,18 +511,11 @@ class object_sdf():
                 except ValueError:
                     print("Error: Arrays in pca_base have inconsistent shapes. Fixing...")
                     points = np.concatenate([p for p in points if p.shape[1] == 3])
-            # Compute mean of the dataset (center of mass)
             pca = PCA(n_components=1)
             projected = pca.fit_transform(points)  # Project points onto 1D principal axis
-
-            # Find n-section points along the principal component
             min_proj, max_proj = projected.min(), projected.max()
             section_values = np.linspace(min_proj, max_proj, num=n+1)[1:-1]  # Exclude endpoints
-
-            # Ensure correct shape for PCA inverse transform
             section_values = section_values.reshape(-1, 1)
-
-            # Convert back to original space using PCA inverse transform
             section_points = pca.inverse_transform(section_values)
 
             return section_points
@@ -439,16 +528,13 @@ class object_sdf():
         normal_similarity = torch.sum(hand_normals * sdf_normal, dim=-1)
         condition_antipodal = normal_similarity < self.cosine_threshold
         point_indices = torch.nonzero(condition_sdf & condition_antipodal, as_tuple=True)[0]
-        # print("contact points number", len(point_indices))
         contact_points = hand_points[point_indices]
         contact_normals = sdf_normal[point_indices]
 
-        #normalize the points
         contact_points_c = contact_points - contact_points.mean(dim=0)
         contact_normals = contact_normals.cpu().detach().numpy()    
         contact_points  = contact_points.cpu().detach().numpy()
 
-        #cluster the contact normals first
         clusterer_n = hdbscan.HDBSCAN(min_cluster_size=10)
         clusterer_n.fit(contact_normals)
 
@@ -457,13 +543,8 @@ class object_sdf():
         clusterer_p.fit(contact_points)
 
         labels_p = np.array(clusterer_p.labels_)
-        # print("labels_n", labels_n)
-        # print("labels_p", labels_p)
-
-        #TODO: be addaptive, rise the min_cluster_size if the number of clusters more than 5
 
         
-        # filer out -1
         valid_mask =  (labels_n != -1) & (labels_p != -1)
         contact_points = contact_points[valid_mask]
         contact_normals = contact_normals[valid_mask]
@@ -556,40 +637,107 @@ class object_sdf():
 
         print(self.contact_target)
 
+    def _select_contact_targets_by_count(self, contact_points, contact_normals, target_count):
+        """Select representative contact points without cross-finger clustering."""
+        if contact_points.size(0) == 0:
+            return contact_points
+
+        if target_count <= 1 or contact_points.size(0) == 1:
+            return contact_points[:1]
+
+        if target_count >= contact_points.size(0):
+            return contact_points
+
+        # For two contacts, prefer a near-antipodal pair.
+        if target_count == 2:
+            normal_dot = torch.matmul(contact_normals, contact_normals.transpose(0, 1))
+            i, j = torch.where(
+                normal_dot == torch.min(normal_dot + torch.eye(
+                    normal_dot.size(0), device=normal_dot.device
+                ) * 10.0)
+            )
+            return torch.vstack([contact_points[i[0]], contact_points[j[0]]])
+
+        # Greedy farthest-point sampling for >2 contacts.
+        selected = [0]
+        remaining = list(range(1, contact_points.size(0)))
+        while len(selected) < target_count and len(remaining) > 0:
+            sel_pts = contact_points[selected]
+            rem_pts = contact_points[remaining]
+            dmat = torch.cdist(rem_pts.unsqueeze(0), sel_pts.unsqueeze(0)).squeeze(0)
+            score = torch.min(dmat, dim=1).values
+            best = remaining[int(torch.argmax(score).item())]
+            selected.append(best)
+            remaining.remove(best)
+        return contact_points[selected]
+
+    def hand_contact_cluster_mano_direct(self):
+        """
+        Build contact targets directly from MANO finger zones, without HDBSCAN.
+        This path is for MANO users that want explicit finger correspondence.
+        """
+        hand_contact_points = self.hand_model.get_contact_zones().to(torch.float32).to(self.device)
+        finger_normals = self.hand_model.get_contact_normals().to(torch.float32).to(self.device)
+        sdf_query, sdf_normal = self.pv_sdf(hand_contact_points)
+
+        condition_sdf = sdf_query <= self.contact_threshold
+        normal_similarity = torch.sum(finger_normals * sdf_normal, dim=-1)
+        condition_antipodal = normal_similarity < self.cosine_threshold
+        valid_mask = condition_sdf & condition_antipodal
+
+        per_finger_points = []
+        per_finger_normals = []
+        finger_count = hand_contact_points.size(0)
+        for finger_id in range(finger_count):
+            valid_idx = torch.where(valid_mask[finger_id])[0]
+            if valid_idx.numel() == 0:
+                continue
+            sdf_values = sdf_query[finger_id, valid_idx]
+            best_local = valid_idx[torch.argmin(sdf_values)]
+            per_finger_points.append(hand_contact_points[finger_id, best_local])
+            per_finger_normals.append(sdf_normal[finger_id, best_local])
+
+        if len(per_finger_points) == 0:
+            # Fallback keeps previous behavior when no MANO-zone contact is found.
+            self.hand_contact_cluster_hdbscan()
+            return
+
+        contact_points = torch.stack(per_finger_points, dim=0)
+        contact_normals = torch.stack(per_finger_normals, dim=0)
+        self.hand_contact = contact_points.size(0)
+
+        target_count = min(self.robot_contact, contact_points.size(0))
+        self.contact_target = self._select_contact_targets_by_count(
+            contact_points=contact_points,
+            contact_normals=contact_normals,
+            target_count=target_count,
+        )
+        print(self.contact_target)
+
+    def build_contact_target(self, method="hdbscan"):
+        try:
+            if method == "hdbscan":
+                self.hand_contact_cluster_hdbscan()
+            elif method == "mano":
+                self.hand_contact_cluster_mano_direct()
+            elif method == "kmeans":
+                self.hand_contact_cluster_v2()
+            else:
+                raise ValueError(
+                    "Unknown contact target method '{}'. "
+                    "Use one of: hdbscan, mano, kmeans.".format(method)
+                )
+            if self.contact_target is None or self.contact_target.numel() == 0:
+                self._fallback_contact_target()
+        except Exception as exc:
+            print(f"[object_sdf] contact target fallback due to: {exc}")
+            self._fallback_contact_target()
+
     def sdf_loss(self, points):
         sdf_val = SDFLayer.apply(points, self.pv_sdf)
-        return (sdf_val**2).sum()
-            
-    def extreme_distance(self, n, n_t):
-        N,D = n.size()
-        N_t,D_t = n_t.size()
-        rank = []
-        remaining = torch.range(0,N_t-1, dtype=torch.long)
-        while len(rank) < N_t:
-            for ax in range(D):
-                if len(remaining) == 0:
-                    break
-                min_id = remaining[torch.argmin(n_t[remaining,ax])]
-                max_id = remaining[torch.argmax(n_t[remaining,ax])]
+        return (sdf_val**2).mean()
+        # return torch.sqrt((sdf_val**2).sum() + 1e-12)
 
-                if torch.abs(n_t[min_id,ax]) > torch.abs(n_t[max_id,ax]):
-                    rank.append(min_id)
-                    remaining = remaining[remaining != min_id]
-                else:
-                    rank.append(max_id)
-                    remaining = remaining[remaining != max_id]        
-
-                if len(remaining) == 0:
-                    break
-        rank = torch.stack(rank)
-
-        repeats = (N+N_t-1)//N_t
-        rank = rank.repeat(repeats)[:N]
-        target_n_t = n_t[rank]
-
-        loss = torch.norm(n - target_n_t, dim=-1).sum()
-
-        return  loss
 
     def minimum_internal_distance(self, x):
         x = x.view(-1, 3)
@@ -613,9 +761,9 @@ class object_sdf():
         x_norm = x/torch.norm(x, dim = -1).max()
         G = self.loss.x_to_G(x_norm)
         
-        GG = self.loss.loss_8a(G)
+        lin_ind = self.loss.lin_ind(G)
         f, we = self.loss.linearized_cone(normal, w)
-        Gf = self.loss.loss_8b(f, G)
+        net_wrench = self.loss.net_wrench(f, G)
         
         
         intFC = self.loss.inter_fc(w)
@@ -626,19 +774,27 @@ class object_sdf():
         e_dist = self.relu((torch.norm(x.squeeze(0) - self.contact_target, dim=-1) - 0.01)).sum()
         
         minimum_internal_distance = self.minimum_internal_distance(x)
-        sum_ = 1*sdf + 1*Gf + GG + intFC + 10*e_dist + 1*minimum_internal_distance
-        return dict(sdf=sdf, Gf=Gf,  GG=GG, intFC=intFC, distance=e_dist, inter_dist = minimum_internal_distance, loss=sum_)
+        sum_ = sdf + net_wrench + lin_ind + intFC + 10*e_dist + minimum_internal_distance
+        return dict(
+            sdf=sdf,
+            net_wrench=net_wrench,
+            lin_ind=lin_ind,
+            intFC=intFC,
+            distance=e_dist,
+            inter_dist=minimum_internal_distance,
+            loss=sum_,
+        )
     
     def gf_residual(self, x, w):
         val, normal = self.pv_sdf(x)
         x_norm = x/torch.norm(x, dim = -1).max()
         G = self.loss.x_to_G(x_norm)
-        GG = self.loss.loss_8a(G)
+        lin_ind = self.loss.lin_ind(G)
         f, we = self.loss.linearized_cone(normal, w)
-        Gf = self.loss.loss_8b(f, G)
+        net_wrench = self.loss.net_wrench(f, G)
         intFC = self.loss.inter_fc(w)
-        sum_ = Gf + intFC + GG 
-        return dict(Gf=Gf, GG=GG, intFC=intFC, loss=sum_)
+        sum_ = net_wrench + intFC + lin_ind
+        return dict(net_wrench=net_wrench, lin_ind=lin_ind, intFC=intFC, loss=sum_)
 
     def loss_gf(self, x, w):
         if self.contact_target is None:
@@ -647,87 +803,15 @@ class object_sdf():
         
         x_norm = x/torch.norm(x, dim = -1).max()
         G = self.loss.x_to_G(x_norm)
-        GG = self.loss.loss_8a(G)
+        lin_ind = self.loss.lin_ind(G)
         f, we = self.loss.linearized_cone(normal, w)
-        Gf = self.loss.loss_8b(f, G)
+        net_wrench = self.loss.net_wrench(f, G)
         intFC = self.loss.inter_fc(w)
-        sum_ = Gf + intFC + GG 
-        return dict(Gf=Gf, GG=GG, intFC=intFC, loss=sum_)
+        sum_ = net_wrench + intFC + lin_ind
+        return dict(net_wrench=net_wrench, lin_ind=lin_ind, intFC=intFC, loss=sum_)
     
-    def loss_fc_sfw(self, x, w):
-        if self.contact_target is None:
-            self.hand_contact_cluster_v2()
-        val, normal = self.pv_sdf(x)
-
-        G = self.loss.x_to_G(x)
-        GG = self.loss.loss_8a(G)
-        f, we = self.loss.linearized_cone(normal, w)
-        #wrench = self.loss.wrench_space(x, we)
-        Gf = self.loss.loss_8b(f, G)
-        intFC = self.loss.inter_fc(w)
-        sdf = self.sdf_loss(x)
-        #e_dist = self.extreme_distance(x.squeeze(0), self.hand_object_contact())
-        e_dist = self.relu((torch.norm(x.squeeze(0) - self.contact_target, dim=-1) - 0.01)).sum()
-        #print("sdf",sdf, "Gf", Gf, "GG", GG, "intFC", intFC, "e_dist", e_dist)
-        sum_ = sdf + Gf + GG + 0 + 5*e_dist
-        return dict(sdf=sdf, Gf=Gf,  GG=GG, distance=e_dist, loss=sum_)
-
-    def wrench_hull(self, x, w, with_x = False):
-        if self.contact_target is None:
-            self.hand_contact_cluster_v2()
-        def convex_hull(wrench):
-            """
-            """
-            #print(wrench.size())
-            w_np = wrench.view(-1, 6).cpu().detach().numpy()
-            #print(np.linalg.matrix_rank(w_np))
-            #print(w_np)
-            w_hull = ConvexHull(w_np)
-            eq = w_hull.equations
-            coef = eq[:, :-1]
-            b = eq[:, -1]
-            
-            dist = np.abs(b)/np.linalg.norm(coef, ord=2, axis=-1)
-            # print("volume", w_hull.volume)  
-            #print(dist)
-            idx = np.argmin(dist)
-            vertices = w_hull.simplices[idx]
-            selected = wrench[:, vertices, :]
-            return torch.norm(selected,p=2,dim=-1).mean(), torch.tensor(dist[idx]).to(wrench.device)
-        B,N,d = x.shape
-        val, normal = self.pv_sdf(x)
-        x_norm = x
-        f, we = self.loss.linearized_cone(normal, w) # f: B x N x 3, we: B x N x 4 x 3
-        # calculate the wrench space
-        w_space = self.loss.wrench_space(x_norm, we)
-        selected, dist = convex_hull(w_space)
-        intFC = self.loss.inter_fc(w)
-
-        G_ = self.loss.x_to_G(x_norm)
-        GG_ = self.loss.loss_8a(G_)
-        gf = self.loss.loss_8b(f, G_)
-
-        if with_x:
-            
-            sdf = self.sdf_loss(x)
-            e_dist = self.relu((torch.norm(x.squeeze(0) - self.contact_target, dim=-1) - 0.05)).sum()
-            G = self.loss.x_to_G(x)
-            GG = self.loss.loss_8a(G)
-            sum_ = 1*sdf + 1.*gf + 1*GG + 1*e_dist - 1*selected +1*intFC
-            return dict(sdf=sdf, Gf=gf, GG=GG, distance=e_dist, intFC = intFC, radius=dist, loss=sum_)
-        else:
-            sum_ = gf + intFC - 1*selected
-            return dict(Gf=gf, intFC=intFC, radius=dist, loss=sum_)
-
     def draw(self, color="green", opacity = 0.5):
         obj_vert = self.obj_vert.squeeze().cpu().detach().numpy()
         obj_face = self.obj_face.squeeze().cpu().detach().numpy()
         mesh_obj = go.Mesh3d(x=obj_vert[:,0], y=obj_vert[:,1], z=obj_vert[:,2], i=obj_face[:,0], j=obj_face[:,1], k=obj_face[:,2], color=color, opacity=opacity)
         return mesh_obj
-    
-    def collision_check(self, points):
-        sdf_val, sdf_normal = self.pv_sdf(points.squeeze(0))
-        #print(sdf_val[sdf_val <= 0].size())
-        # penetration = sdf_val[sdf_val <= 0].mean()
-        # print(penetration)
-        return relu(-sdf_val).sum()

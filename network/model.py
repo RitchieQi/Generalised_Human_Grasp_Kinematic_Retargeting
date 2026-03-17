@@ -1,8 +1,8 @@
-from networks import ResNetBackbone, UNet, SDFHead, ManoHead, kinematic_embedding
+from network.networks import ResNetBackbone, UNet, SDFHead, ManoHead, kinematic_embedding
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import soft_argmax, decode_volume, get_mano_preds
+from network.utils import soft_argmax, decode_volume, get_mano_preds
 
 
 class model(nn.Module):

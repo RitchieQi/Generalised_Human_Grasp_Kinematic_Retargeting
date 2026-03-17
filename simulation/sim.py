@@ -21,7 +21,10 @@ import traceback
 from multiprocessing import Process, Queue
 from itertools import product
 import os
-from environment import Environment
+try:
+    from .environment import Environment
+except ImportError:
+    from environment import Environment
 
 def simulation_worker(robot,mu,data_sample, exp, q):
     try:

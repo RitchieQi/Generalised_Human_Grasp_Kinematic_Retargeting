@@ -37,12 +37,11 @@ def main(rank):
     device = 'cuda:%d' % local_rank
     torch.cuda.set_device(local_rank)
     exp = osp.dirname(__file__)
-    obj_pose_result_dir = osp.join(exp, 'obj_pose_results')
-    hand_pose_result_dir = osp.join(exp, 'hand_pose_results')
-    if not osp.exists(obj_pose_result_dir):
-        os.makedirs(obj_pose_result_dir)
-    if not osp.exists(hand_pose_result_dir):
-        os.makedirs(hand_pose_result_dir)
+    results_root = osp.join(exp, 'results')
+    obj_pose_result_dir = osp.join(results_root, 'obj_pose_results')
+    hand_pose_result_dir = osp.join(results_root, 'hand_pose_results')
+    os.makedirs(obj_pose_result_dir, exist_ok=True)
+    os.makedirs(hand_pose_result_dir, exist_ok=True)
     
     tester = Tester(local_rank=local_rank, exp=exp, test_epoch=1600-1)
     tester._make_batch_generator()
@@ -71,7 +70,15 @@ def main(rank):
             export_pose_results(obj_pose_result_dir, obj_pose_results, metas)
             export_pose_results(hand_pose_result_dir, hand_pose_results, metas)
             from reconstruction import reconstruct
-            reconstruct(metas['id'], tester.model.module.obj_sdf_head, sdf_feat, metas, hand_pose_results, obj_pose_results)
+            reconstruct(
+                metas['id'],
+                tester.model.module.obj_sdf_head,
+                sdf_feat,
+                metas,
+                hand_pose_results,
+                obj_pose_results,
+                results_root=results_root,
+            )
 
 
 if __name__ == '__main__':

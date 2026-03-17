@@ -13,14 +13,17 @@ import cv2
 from manopth.manolayer import ManoLayer
 import traceback
 import os
-from optimisation_tmp.utils import rodrigues
+try:
+    from .utils import rodrigues
+except ImportError:
+    from utils import rodrigues
 
 
 class ycb_opt_fetcher(Dataset):
     def __init__(self, 
-                 dexycb_dir = '/home/liyuan/DexYCB/', 
+                 dexycb_dir = None, 
                  task = "test", 
-                 data_dir = osp.join(osp.dirname(osp.abspath(__file__)),"..","..", "CtcSDF", "data"), 
+                 data_dir = osp.join(osp.dirname(osp.abspath(__file__)),"..","dataset", "data"), 
                  data_sample = 5,
                  robot_name = "Shadow",
                  mu = 0.1,
@@ -30,28 +33,33 @@ class ycb_opt_fetcher(Dataset):
                  exp_name = "genhand",
                  test_sdf = False,
                 ):
+        repo_root = osp.abspath(osp.join(osp.dirname(__file__), ".."))
         self.sdf_source = SDF_source
+        if dexycb_dir is None:
+            dexycb_dir = os.environ.get("DEX_YCB_DIR", osp.join(osp.expanduser("~"), "DexYCB"))
         os.environ["DEX_YCB_DIR"] = dexycb_dir
         self.getdata = DexYCBDataset("s0", task)
         self.robot_name = robot_name
         self.mu = mu
         self.data_sample = data_sample
         if exp_name == "genhand" and test_sdf == False:
-            self.result_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "results", self.robot_name, "mu"+str(mu))
+            self.result_dir = osp.join(repo_root, "optimisation", "results", self.robot_name, "mu"+str(mu))
         elif exp_name == "nv" and test_sdf == False:
-            self.result_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "results_nv", self.robot_name, "mu"+str(mu))
+            self.result_dir = osp.join(repo_root, "optimisation", "results_nv", self.robot_name, "mu"+str(mu))
         elif task == "train":
-            self.result_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..")
+            self.result_dir = repo_root
         elif task == "test" and exp_name is None:
-            self.result_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..")
+            self.result_dir = repo_root
         elif test_sdf == True and exp_name == 'genhand':
-            self.result_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "results_sdf", self.robot_name, "mu"+str(mu))
+            self.result_dir = osp.join(repo_root, "optimisation", "results_sdf", self.robot_name, "mu"+str(mu))
         elif test_sdf == True and exp_name == 'nv':
-            self.result_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "results_nv_sdf", self.robot_name, "mu"+str(mu))
+            self.result_dir = osp.join(repo_root, "optimisation", "results_nv_sdf", self.robot_name, "mu"+str(mu))
         
-        self.hand_pred_pose_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "CtcSDF_v2", "hmano_osdf", "hand_pose_results")
-        self.obj_pred_pose_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "CtcSDF_v2", "hmano_osdf", "obj_pose_results")
-        self.obj_pred_mesh_dir = osp.join(osp.abspath(osp.dirname(__file__)), "..", "..", "CtcSDF_v2", "hmano_osdf", "mesh")
+        network_root = osp.join(repo_root, "network")
+        network_results = osp.join(network_root, "results")
+        self.hand_pred_pose_dir = osp.join(network_results, "hand_pose_results")
+        self.obj_pred_pose_dir = osp.join(network_results, "obj_pose_results")
+        self.obj_pred_mesh_dir = osp.join(network_results, "mesh")
         self.mesh_dir = osp.join(data_dir, 'mesh_data', 'mesh_obj')
         self.repeat = repeat
         self.load_assert = load_assert
@@ -78,7 +86,11 @@ class ycb_opt_fetcher(Dataset):
             self.faces = torch.LongTensor(np.load(osp.join(osp.dirname(osp.abspath(__file__)),'..', '..', 'CtcSDF','closed_fmano.npy')))            
         
     def __len__(self):
-        return len(os.listdir(self.result_dir))
+        if self.sample is not None:
+            sample_count = len(self.sample)
+        else:
+            sample_count = len(self.config['images'])
+        return sample_count * self.repeat
 
     def __getitem__(self, idx_):
 

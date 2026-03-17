@@ -1,4 +1,7 @@
-from dataset_opt import dexycb_testfullfeed
+try:
+    from .dataset_opt import dexycb_testfullfeed
+except ImportError:
+    from dataset_opt import dexycb_testfullfeed
 from optimisation.robot import CtcRobot, Shadow, Allegro, Barrett, Robotiq
 import torch
 from tqdm import tqdm
@@ -17,6 +20,8 @@ import json
 osp = os.path
 import traceback
 import numpy as np
+import cv2
+from matplotlib import pyplot as plt
 import torch.multiprocessing as mp
 
 
@@ -69,10 +74,6 @@ class EarlyStopping:
 
 
 class Optimization:
-    """
-    Currently we still have problems with the parallelization of the optimization process, 
-    due to the out-of-sequence test dataset and variance in the posture of the objects.
-    """
     def __init__(self, 
                  robot: CtcRobot,
                  dataset: Dataset,
@@ -83,18 +84,34 @@ class Optimization:
                  mu: float = 0.9,
                  task: str = "GH",
                  source: str = "ycb",
+                 contact_target_method: str = "hdbscan",
+                 contact_threshold: float = 0.020,
+                 sdf_backend: str = "mesh",
+                 sdf_query_fn=None,
+                 sdf_prepare_fn=None,
+                 obj_scale: float = 1.0,
                  ):
         self.robot = robot
         self.dataset = dataset
-        self.dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1)
+        # Keep single-process loading for broad compatibility in constrained runtimes.
+        self.dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
         self.device = device
         self.maximum_iter = maximum_iter
         self.visualize = visualize
-        self.obj_model = object_sdf(device=self.device, robot_contact=self.robot.contacts_num, contact_threshold=0.020)
+        self.obj_model = object_sdf(
+            device=self.device,
+            robot_contact=self.robot.contacts_num,
+            contact_threshold=contact_threshold,
+            sdf_backend=sdf_backend,
+            sdf_query_fn=sdf_query_fn,
+            obj_scale=obj_scale,
+        )
+        self.sdf_prepare_fn = sdf_prepare_fn
         self.contact_normal = None
         self.actual_contact = None
         self.repeat = repeat
         self.mu = mu
+        self.contact_target_method = contact_target_method
         
         if task == "GH" and source == "ycb":
             self.result_dir = osp.join(osp.dirname(__file__), "results", self.robot.robot_model, "mu%.1f" % self.mu)
@@ -111,16 +128,21 @@ class Optimization:
         if not osp.exists(self.result_dir):
             print("create result directory")
             os.makedirs(self.result_dir)
+
+    def _prepare_sdf_context(self, input_pack):
+        if self.sdf_prepare_fn is None:
+            return
+        self.sdf_prepare_fn(input_pack)
             
     def lr_schedule_fc(self, optimizer, epoch):
-        inital_lr = 0.005
+        inital_lr = 0.001
         interval = 1000
         factor = 0.6
         lr = inital_lr * (factor ** (epoch // interval))
         for i, param in enumerate(optimizer.param_groups):
             param['lr'] = lr
 
-    def lr_schedule_gq(self, optimizer, epoch):
+    def lr_schedule_w(self, optimizer, epoch):
         inital_lr = 0.005
         interval = 1000
         factor = 0.6
@@ -129,15 +151,15 @@ class Optimization:
             param['lr'] = lr
     
     def lr_schedule_q(self, optimizer, epoch):
-        inital_lr = 0.1
+        inital_lr = 0.05
         interval = 50
-        factor = 0.5
+        factor = 0.999
         lr = inital_lr * (factor ** (epoch // interval))
         for i, param in enumerate(optimizer.param_groups):
             param['lr'] = lr
 
     def lr_schedule_q_2(self, optimizer, epoch):
-        inital_lr = 0.1
+        inital_lr = 0.05
         interval = 100
         factor = 0.5
         lr = inital_lr * (factor ** (epoch // interval))
@@ -164,25 +186,31 @@ class Optimization:
                        joints: torch.Tensor,
                        transformation: torch.Tensor,
                        ): #add object information
-        #reset origin to the object centre
-        obj_mesh_v = obj_mesh_v - obj_centre
-        hand_mesh_v = hand_mesh_v - obj_centre
-        joints = joints - obj_centre
-        transformation[:, :3, 3] = transformation[:, :3, 3] - obj_centre
+        joints_raw = joints.clone()
+
+        # Reset origin in optimization with mesh/object center from current sample frame.
+        center_for_opt = obj_centre
+        obj_mesh_v = obj_mesh_v - center_for_opt
+        hand_mesh_v = hand_mesh_v - center_for_opt
+        joints = joints - center_for_opt
+        transformation[:, :3, 3] = transformation[:, :3, 3] - center_for_opt
+        if self.obj_model.sdf_backend == "network":
+            # Network SDF operates in hand-centered frame. Query points in optimization
+            # are object-centered by mesh center, so offset must use mesh-center-in-hand-frame.
+            query_offset = obj_centre - joints_raw[:, :1, :]
+            self.obj_model.set_network_query_offset(query_offset)
+        else:
+            self.obj_model.set_network_query_offset(None)
         
         self.obj_model.loss.mu = torch.tensor(self.mu).float().to(self.device)
         print("mu", self.obj_model.loss.mu.item())
         self.robot.init_q(transformation)
         self.q = self.robot.q
         self.robot.forward_kinematics(self.q)
-        self.opt_q = torch.optim.Adam([self.q], lr=0.1)
+        self.opt_q = torch.optim.Adam([self.q], lr=0.01)
         self.obj_model.reset([obj_mesh_v, obj_mesh_f], [hand_mesh_v, hand_mesh_f], joints)
-        #self.obj_model.hand_contact_cluster_mano_agnostic()
-        #self.obj_model.hand_contact_cluster_v2()
-        self.obj_model.hand_contact_cluster_hdbscan()
-        # x_ = torch.randn((1,self.obj_model.contact_target.size(0),3),dtype=torch.float32,requires_grad=True, device=self.device)*0.05
+        self.obj_model.build_contact_target(method=self.contact_target_method)
         x_ = self.obj_model.contact_target.unsqueeze(0)
-        # print("target", x_.size())
         self.x = x_.clone().detach().requires_grad_(True)
         print("self x", self.x)
         w = torch.ones((1,self.obj_model.contact_target.size(0),4),dtype=torch.float32, device=self.device)*0.25
@@ -190,22 +218,13 @@ class Optimization:
         self.robot.row_ind = None
         self.robot.col_ind = None
         self.opt_fc = torch.optim.Adam([self.x, self.w], lr=0.001)
-        self.opt_gq = torch.optim.Adam([self.w], lr=0.001)
-        # self.opt_gq = torch.optim.Adam([self.x, self.w], lr=0.001)
-
         self.opt_gf = torch.optim.Adam([self.w], lr=0.005)
-        self.opt_gqre = torch.optim.Adam([self.w], lr=0.001)
         
-        self.fc_early_stop = EarlyStopping(patience=100, min_delta=0)
-        self.gq_early_stop = EarlyStopping(patience=2000, min_delta=0)
+        self.fc_early_stop = EarlyStopping(patience=1000, min_delta=0)
         if self.robot.robot_model == "Shadow" and self.robot.robot_model == "Allegro":
-            self.q_early_stop = EarlyStopping(patience=20, min_delta=0.01)
+            self.q_early_stop = EarlyStopping(patience=10, min_delta=0.01)
         self.q_early_stop = EarlyStopping(patience=100, min_delta=0.001)
 
-        if self.task == "NV":
-            self.target = torch.cat((self.obj_model.hand_model.get_keypoints().squeeze(), torch.tensor([0., 0., 0.], device=self.device).view(1, 3)), dim=0)
-
-        print('x',self.x)
     
     def penetration_check(self, q):
         obj_points = self.obj_model.obj_points
@@ -323,17 +342,8 @@ class Optimization:
             loss_fc = data["loss"]
             loss_fc.backward()
             self.opt_fc.step()
-            if torch.allclose(data["sdf"],torch.tensor(0, dtype=torch.float), atol=1e-6) and torch.allclose(data["Gf"],torch.tensor(0, dtype=torch.float), atol=1e-3) and torch.allclose(data["distance"],torch.tensor(0, dtype=torch.float), atol=1e-3):
+            if torch.allclose(data["sdf"], torch.tensor(0, dtype=torch.float), atol=1e-3) and torch.allclose(data["net_wrench"], torch.tensor(0, dtype=torch.float), atol=1e-3) and torch.allclose(data["distance"], torch.tensor(0, dtype=torch.float), atol=1e-3):
                  converge = True
-
-    def gq_optimization(self):
-        pbar = tqdm(enumerate(range(self.maximum_iter[1])), total=self.maximum_iter[1])
-        #for i, _ in enumerate(range(self.maximum_iter[1])):
-        for i, _ in pbar:
-            self.opt_gq.zero_grad()
-            loss_gq = self.obj_model.grasp_quality(self.x, self.w)["loss"]
-            loss_gq.backward()
-            self.opt_gq.step()
 
     def q_optimization(self):
         pbar = tqdm(enumerate(range(self.maximum_iter[2])), total=self.maximum_iter[2])
@@ -368,7 +378,7 @@ class Optimization:
             pbar.set_description(", ".join(description))
             self.fc_early_stop.ealy_stop(loss_fc)
             #time.sleep(0.05)
-            if torch.allclose(data["sdf"],torch.tensor(0, dtype=torch.float), atol=1e-4) and torch.allclose(data["Gf"],torch.tensor(0, dtype=torch.float), atol=1e-3) and torch.allclose(data["distance"],torch.tensor(0, dtype=torch.float), atol=2e-2) and torch.allclose(data["GG"],torch.tensor(0, dtype=torch.float), atol=1e-3):
+            if torch.allclose(data["sdf"], torch.tensor(0, dtype=torch.float), atol=5e-3) and torch.allclose(data["net_wrench"], torch.tensor(0, dtype=torch.float), atol=1e-3) and torch.allclose(data["distance"], torch.tensor(0, dtype=torch.float), atol=2e-2) and torch.allclose(data["lin_ind"], torch.tensor(0, dtype=torch.float), atol=1e-3):
                  converge = True
         self.fc_early_stop.reset()
         return data
@@ -378,7 +388,7 @@ class Optimization:
         for i, _ in enumerate(range(self.maximum_iter[1])):
             if converge:
                 break
-            self.lr_schedule_gq(self.opt_gf, i)
+            self.lr_schedule_w(self.opt_gf, i)
             self.opt_gf.zero_grad()
             data = self.obj_model.loss_gf(self.x, self.w)
             loss_gf = data["loss"]
@@ -386,30 +396,9 @@ class Optimization:
             self.opt_gf.step()
             description = [f"{key}: {value.item():.4f}" for key, value in data.items()]
             pbar.set_description(", ".join(description))
-            if torch.allclose(data["Gf"],torch.tensor(0, dtype=torch.float), atol=1e-3):
+            if torch.allclose(data["net_wrench"], torch.tensor(0, dtype=torch.float), atol=1e-3):
                 converge = True
         # print(description,'x',self.x,'w',self.w)
-        return data
-
-    def gq_optimization_verbose(self, pbar):
-        #pbar = tqdm(enumerate(range(self.maximum_iter[1])), total=self.maximum_iter[1])
-        start_r = self.obj_model.wrench_hull(self.x, self.w)
-        for i, _ in enumerate(range(self.maximum_iter[1])):
-            if self.gq_early_stop.early_stop:
-                break
-            self.lr_schedule_gq(self.opt_gq, i)
-            self.opt_gq.zero_grad()
-            data = self.obj_model.wrench_hull(self.x, self.w, with_x=False)
-            loss_gq = data["loss"]
-            loss_gq.backward(retain_graph=True)
-            self.opt_gq.step()
-            description = [f"{key}: {value.item():.4f}" for key, value in data.items()]
-            pbar.set_description(", ".join(description))
-            self.gq_early_stop.ealy_stop(data["radius"])
-        # print(description,'x',self.x,'w',self.w)
-        self.contact_normal = self.obj_model.pv_sdf(self.x)[1]
-        data["r_start"] = start_r["radius"]
-        self.gq_early_stop.reset()
         return data
 
     def gf_reoptimization_verbose(self, pbar):
@@ -417,7 +406,7 @@ class Optimization:
         for i, _ in enumerate(range(self.maximum_iter[1])):
             if converge:
                 break
-            self.lr_schedule_gq(self.opt_gf, i)
+            self.lr_schedule_w(self.opt_gf, i)
             self.opt_gf.zero_grad()
             data = self.obj_model.loss_gf(self.actual_contact, self.w)
             loss_gf = data["loss"]
@@ -425,27 +414,9 @@ class Optimization:
             self.opt_gf.step()
             description = [f"{key}: {value.item():.4f}" for key, value in data.items()]
             pbar.set_description(", ".join(description))
-            if torch.allclose(data["Gf"],torch.tensor(0, dtype=torch.float), atol=1e-3):
+            if torch.allclose(data["net_wrench"], torch.tensor(0, dtype=torch.float), atol=1e-3):
                 converge = True
         # print(description,'x',self.x,'w',self.w)
-        return data
-    
-    def gq_reoptimization_verbose(self, pbar):
-        start_r = self.obj_model.wrench_hull(self.actual_contact, self.w)
-        for i, _ in enumerate(range(self.maximum_iter[1])):
-            if self.gq_early_stop.early_stop:
-                break
-            #self.lr_schedule_gq(self.opt_gqre, i)
-            self.opt_gqre.zero_grad()
-            data = self.obj_model.wrench_hull(self.actual_contact, self.w)
-            loss_gqre = data["loss"]
-            loss_gqre.backward(retain_graph=True)
-            self.opt_gqre.step()
-            self.gq_early_stop.ealy_stop(data["radius"])
-            description = [f"{key}: {value.item():.4f}" for key, value in data.items()]
-            pbar.set_description(", ".join(description))
-        data["r_start"] = start_r["radius"]
-        self.gq_early_stop.reset()
         return data
     
     def q_optimization_verbose(self, pbar):
@@ -595,14 +566,16 @@ class Optimization:
                 data["self_collision"] = self_collision
                 data["loss"] += 1000*self_collision
             
-            if i > 0.001*self.maximum_iter[2]:
+            if i > 0.02*self.maximum_iter[2]:
                 collision = self.penetration_check(self.q)
                 data["collision"] = collision
-                data["loss"] += 500*collision
+                data["loss"] += 100*collision
                 
             data["iteration"] = torch.tensor(i)
             loss_q = data["loss"]
             loss_q.backward()
+            # for loss in data["object_loss"]:
+            #     loss.backward(retain_graph=True)
             self.opt_q.step()
             description = [f"{key}: {value.item():.4f}" for key, value in data.items()]
             pbar.set_description(", ".join(description))
@@ -695,23 +668,24 @@ class Optimization:
         # r_normed_transformed = (T[:3,:3] @ r_normed.T + T[:3,3].reshape(-1,1)).T
 
 
-        # fingertip = self.obj_model.hand_model.get_fingertips().squeeze().detach().cpu().numpy()
-        # x = self.x.squeeze().detach().cpu().numpy()
+        # fingertip = self.obj_model.hand_model.get_keypoints().squeeze().detach().cpu().numpy()
+        # # x = self.x.squeeze().detach().cpu().numpy()
+        # # x = self.obj_model.hand_model.get_fingertips().squeeze().detach().cpu().numpy()
         # contact = self.obj_model.contact_target.squeeze().detach().cpu().numpy()
-        # robot = self.robot.get_keypoints(self.q).squeeze().detach().cpu().numpy()
+        # x = self.robot.get_keypoints(self.q, None).squeeze().detach().cpu().numpy()
         
-        # data.append(self.scatter(fingertip[0, None], size = 10, color='red', text="M"))
-        # data.append(self.scatter(fingertip[1, None], size = 10, color='blue', text="M"))
-        # data.append(self.scatter(fingertip[2, None], size = 10, color='green', text="M"))
-        # data.append(self.scatter(fingertip[3, None], size = 10, color='yellow', text="M"))
-        # data.append(self.scatter(fingertip[4, None], size = 10, color='purple', text="M"))
+        # data.append(self.scatter(fingertip[1, None], size = 10, color='red', text="M"))
+        # data.append(self.scatter(fingertip[2, None], size = 10, color='blue', text="M"))
+        # data.append(self.scatter(fingertip[3, None], size = 10, color='green', text="M"))
+        # data.append(self.scatter(fingertip[4, None], size = 10, color='yellow', text="M"))
+        # data.append(self.scatter(fingertip[5, None], size = 10, color='purple', text="M"))
 
-        # data.append(self.scatter(x[0, None], size = 10, color='red', text="X"))
-        # data.append(self.scatter(x[1, None], size = 10, color='blue', text="X"))
-        # data.append(self.scatter(x[2, None], size = 10, color='green', text="X"))
-        # data.append(self.scatter(x[3, None], size = 10, color='yellow', text="X"))
-        # data.append(self.scatter(x[4, None], size = 10, color='purple', text="X"))
-        # colors = ['red', 'blue', 'green', 'yellow', 'purple']
+        # data.append(self.scatter(x[1, None], size = 10, color='red', text="X"))
+        # data.append(self.scatter(x[2, None], size = 10, color='blue', text="X"))
+        # data.append(self.scatter(x[3, None], size = 10, color='green', text="X"))
+        # data.append(self.scatter(x[4, None], size = 10, color='yellow', text="X"))
+        # data.append(self.scatter(x[5, None], size = 10, color='purple', text="X"))
+        # # colors = ['red', 'blue', 'green', 'yellow', 'purple']
         # for i in range(contact.shape[0]):
         #     data.append(self.scatter(contact[i, None], size = 10, color=colors[i], text="C"))
         #     data.append(self.scatter(x[i, None], size = 5, color=colors[i], text="X"))
@@ -773,14 +747,19 @@ class Optimization:
     def first_stage_opt(self, test_bar):
         data_fc = self.fc_optimization_verbose(test_bar)
         data_gf = self.gf_optimization_verbose(test_bar)
-        if self.robot.robot_model != "Robotiq":
-            data_gq = self.gq_optimization_verbose(test_bar)
-        #data_gq = self.gq_optimization_verbose(test_bar)
         data_q = self.q_optimization_verbose_v2(test_bar)
         if self.robot.robot_model != "Robotiq":
-            data_stage1 = dict(gf_0 = data_gf["Gf"], r_0 = data_gq["r_start"], gf_1 = data_gq["Gf"], r_1 = data_gq["radius"], x = self.x.clone(), w = self.w.clone(), q = self.q.clone())
+            data_stage1 = dict(
+                gf_0=data_gf["net_wrench"],
+                r_0=None,
+                gf_1=data_gf["net_wrench"],
+                r_1=None,
+                x=self.x.clone(),
+                w=self.w.clone(),
+                q=self.q.clone(),
+            )
         else:
-            data_stage1 = dict(gf_0 = data_gf["Gf"], x = self.x.clone(), w = self.w.clone(), q = self.q.clone())
+            data_stage1 = dict(gf_0=data_gf["net_wrench"], x=self.x.clone(), w=self.w.clone(), q=self.q.clone())
         return data_stage1
     
     def second_stage_opt(self, test_bar):
@@ -788,18 +767,23 @@ class Optimization:
         # self.obj_model.contact_target = self.actual_contact
         data_fcre = self.fc_optimization_verbose(test_bar)
         data_gfre = self.gf_optimization_verbose(test_bar)
-        if self.robot.robot_model != "Robotiq":
-            data_gqre = self.gq_optimization_verbose(test_bar)
-        # data_gqre = self.gq_optimization_verbose(test_bar)
         data_qre = self.q_optimization_verbose_v2(test_bar)
         self.robot_contact, self.actual_contact = self.robot_object_contact_check(self.q)
         if self.robot.robot_model != "Robotiq":
-            data_stage2 = dict(gf_0r = data_gfre["Gf"], r_0r = data_gqre["r_start"], gf_1r = data_gqre["Gf"], r_1r = data_gqre["radius"], 
-                            xr = self.x.clone(), wr = self.w.clone(), qr = self.q.clone(),
-                            actual_contact = self.actual_contact, robot_contact = self.robot_contact)
+            data_stage2 = dict(
+                gf_0r=data_gfre["net_wrench"],
+                r_0r=None,
+                gf_1r=data_gfre["net_wrench"],
+                r_1r=None,
+                xr=self.x.clone(),
+                wr=self.w.clone(),
+                qr=self.q.clone(),
+                actual_contact=self.actual_contact,
+                robot_contact=self.robot_contact,
+            )
         else:
-            data_stage2 = dict(gf_0r = data_gfre["Gf"], xr = self.x.clone(), wr = self.w.clone(), qr = self.q.clone(),
-                            actual_contact = self.actual_contact, robot_contact = self.robot_contact)
+            data_stage2 = dict(gf_0r=data_gfre["net_wrench"], xr=self.x.clone(), wr=self.w.clone(), qr=self.q.clone(),
+                            actual_contact=self.actual_contact, robot_contact=self.robot_contact)
         return data_stage2
     
     def second_stage_opt_v2(self, test_bar):
@@ -807,13 +791,20 @@ class Optimization:
         self.obj_model.contact_target = self.actual_contact
         data_gfre = self.gf_reoptimization_verbose(test_bar)
         if self.robot.robot_model != "Robotiq":
-            data_gqre = self.gq_reoptimization_verbose(test_bar)
-            data_stage2 = dict(gf_0r = data_gfre["Gf"], r_0r = data_gqre["r_start"], gf_1r = data_gqre["Gf"], r_1r = data_gqre["radius"], 
-                            xr = self.x.clone(), wr = self.w.clone(), qr = self.q.clone(),
-                            actual_contact = self.actual_contact, robot_contact = self.robot_contact)
+            data_stage2 = dict(
+                gf_0r=data_gfre["net_wrench"],
+                r_0r=None,
+                gf_1r=data_gfre["net_wrench"],
+                r_1r=None,
+                xr=self.x.clone(),
+                wr=self.w.clone(),
+                qr=self.q.clone(),
+                actual_contact=self.actual_contact,
+                robot_contact=self.robot_contact,
+            )
         else:
-            data_stage2 = dict(gf_0r = data_gfre["Gf"], xr = self.x.clone(), wr = self.w.clone(), qr = self.q.clone(),
-                            actual_contact = self.actual_contact, robot_contact = self.robot_contact)
+            data_stage2 = dict(gf_0r=data_gfre["net_wrench"], xr=self.x.clone(), wr=self.w.clone(), qr=self.q.clone(),
+                            actual_contact=self.actual_contact, robot_contact=self.robot_contact)
         return data_stage2
 
     def first_stage_opt_wo_gq(self, test_bar):
@@ -824,7 +815,7 @@ class Optimization:
         q_time = time.time() - start_time - fc_time
         
         total_time = time.time() - start_time
-        data_stage1 = dict(gf_0 = data_fc["Gf"], sdf=data_fc["sdf"], x = self.x.clone(), w = self.w.clone(), q = self.q.clone(), fc_time = fc_time, q_time = q_time, total_time = total_time, distance_loss = data_q["distance_loss"])
+        data_stage1 = dict(gf_0=data_fc["net_wrench"], sdf=data_fc["sdf"], x=self.x.clone(), w=self.w.clone(), q=self.q.clone(), fc_time=fc_time, q_time=q_time, total_time=total_time, distance_loss=data_q["distance_loss"])
         return data_stage1
     
     def second_stage_opt_wo_gq(self, test_bar):
@@ -856,6 +847,8 @@ class Optimization:
         return data_stage2
     
     def first_stage_opt_nv(self, test_bar):
+        self.target = torch.cat((self.obj_model.hand_model.get_keypoints().squeeze(), torch.tensor([0., 0., 0.], device=self.device).view(1, 3)), dim=0)
+
         start_time = time.time()
         data_q = self.q_optimization_verbose_nv(test_bar)
         q_time = time.time() - start_time
@@ -866,6 +859,7 @@ class Optimization:
     def run_idx_json_nv(self, idx):
         test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
         input_pack, obj_pack, mano_pack = self.dataset[idx]
+        self._prepare_sdf_context(input_pack)
         obj_mesh_v = obj_pack["verts"].to(self.device).unsqueeze(0)
         obj_mesh_f = obj_pack["faces"].to(self.device).unsqueeze(0)
         obj_certre = obj_pack["centre"].to(self.device).unsqueeze(0)
@@ -875,7 +869,6 @@ class Optimization:
         hand_transformation = mano_pack["transformation"].to(self.device).unsqueeze(0)
         try:
             self.initialization(obj_mesh_v, obj_mesh_f, obj_certre, hand_mesh_v, hand_mesh_f, joints, hand_transformation)
-            print("target", self.target)
             data_nv = self.first_stage_opt_nv(test_bar)
             file_name = str(idx)+"_"+self.robot.robot_model + "_" + "0_"+ "mu_%.1f" %self.obj_model.loss.mu.item()
             data_nv["data_sample_config"] = self.dataset.data_sample
@@ -885,35 +878,21 @@ class Optimization:
             data_nv = {"error": "error", "data_sample_config": self.dataset.data_sample, "idx":idx}
         
         self.write_json(data_nv, file_name)
-        # self.draw()
+        if self.visualize:
+            self.show_image(input_pack["color_img"])
+            self.draw()
         
-    def run_idx_json(self, idx, draw = False, save = False, frontend = False):
+    def run_idx_json(self, idx):
         test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
         input_pack, obj_pack, mano_pack = self.dataset[idx]
+        self._prepare_sdf_context(input_pack)
         # change to estimated object mesh
-        if frontend:
-            mesh_name = input_pack["file_name"] + "_obj.ply"
-            mesh_dir = osp.join(osp.dirname(__file__), "CtcSDF_v2", "hmano_osdf", "mesh", mesh_name)
-            mesh = tm.load(mesh_dir, process=False)
-            hand_trans = obj_pack["hand_trans"].to(self.device).unsqueeze(0)
-            obj_mesh_v = torch.tensor(mesh.vertices, dtype=torch.float32).to(self.device).unsqueeze(0)
-            # obj_mesh_v = obj_mesh_v - hand_trans
-            obj_mesh_f = torch.tensor(mesh.faces, dtype=torch.int32).to(self.device).unsqueeze(0)
-            obj_centre = torch.tensor(mesh.center_mass, dtype=torch.float32).to(self.device).unsqueeze(0)
-            obj_mesh_v = obj_mesh_v - hand_trans
-            obj_centre = obj_centre - hand_trans
-            hand_mesh_name = input_pack["file_name"] + "_hand.ply"
-            hand_mesh_dir = osp.join(osp.dirname(__file__), "CtcSDF_v2", "hmano_osdf", "mesh_hand", hand_mesh_name)
-            hand_mesh = tm.load(hand_mesh_dir, process=False)
-            hand_mesh_v = torch.tensor(hand_mesh.vertices, dtype=torch.float32).to(self.device).unsqueeze(0)
-            hand_mesh_f = torch.tensor(hand_mesh.faces, dtype=torch.int32).to(self.device).unsqueeze(0)
-            hand_mesh_v = hand_mesh_v - hand_trans
-        else:
-            obj_mesh_v = obj_pack["verts"].to(self.device).unsqueeze(0)
-            obj_mesh_f = obj_pack["faces"].to(self.device).unsqueeze(0)
-            obj_centre = obj_pack["centre"].to(self.device).unsqueeze(0)
-            hand_mesh_v = mano_pack["verts"].to(self.device).unsqueeze(0)
-            hand_mesh_f = mano_pack["faces"].to(self.device).unsqueeze(0)
+
+        obj_mesh_v = obj_pack["verts"].to(self.device).unsqueeze(0)
+        obj_mesh_f = obj_pack["faces"].to(self.device).unsqueeze(0)
+        obj_centre = obj_pack["centre"].to(self.device).unsqueeze(0)
+        hand_mesh_v = mano_pack["verts"].to(self.device).unsqueeze(0)
+        hand_mesh_f = mano_pack["faces"].to(self.device).unsqueeze(0)
         joints = mano_pack["joint"].to(self.device).unsqueeze(0)
         hand_transformation = mano_pack["transformation"].to(self.device).unsqueeze(0)
         try:
@@ -928,12 +907,11 @@ class Optimization:
             print(e)
             file_name = str(idx)+"_"+self.robot.robot_model + "_" + "0_"+ "mu_%.1f" %self.obj_model.loss.mu.item()
             data_stage1 = {"error": str(e), "data_sample_config": self.dataset.data_sample, "idx": idx}
-        if save:
             # self.result_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)))
-            self.write_json(data_stage1, file_name)
-        if draw:
+        self.write_json(data_stage1, file_name)
+        if self.visualize:
+            self.show_image(input_pack["color_img"])
             self.draw()
-        # self.draw()
         
     def run_wo_gq(self, restart = None, indices = None):
         if restart is not None:
@@ -952,6 +930,7 @@ class Optimization:
             if i > 20:
                 break
             for j in range(self.repeat):
+                self._prepare_sdf_context(input_pack)
                 obj_mesh_v = obj_pack["verts"].to(self.device)
                 obj_mesh_f = obj_pack["faces"].to(self.device)
                 obj_certre = obj_pack["centre"].to(self.device)
@@ -994,6 +973,7 @@ class Optimization:
         for i, (input_pack, obj_pack, mano_pack) in test_bar:
             i += restart
             for j in range(self.repeat):
+                self._prepare_sdf_context(input_pack)
                 obj_mesh_v = obj_pack["verts"].to(self.device)
                 obj_mesh_f = obj_pack["faces"].to(self.device)
                 obj_certre = obj_pack["centre"].to(self.device)
@@ -1019,6 +999,7 @@ class Optimization:
         test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
         for i, (input_pack, obj_pack, mano_pack) in test_bar:
             for j in range(self.repeat):
+                self._prepare_sdf_context(input_pack)
                 obj_mesh_v = obj_pack["verts"].to(self.device)
                 obj_mesh_f = obj_pack["faces"].to(self.device)
                 obj_certre = obj_pack["centre"].to(self.device)
@@ -1034,157 +1015,6 @@ class Optimization:
                 data_stage1.update(data_stage2)
                 data_stage1["data_sample_config"] = self.dataset.data_sample 
                 self.write_json(data_stage1, file_name)
-                
-    def run_w_idx(self, idx):
-        test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
-        input_pack, obj_pack, mano_pack = self.dataset[idx]
-        color = input_pack['color_img']
-
-        obj_mesh_v = obj_pack["verts"].to(self.device).unsqueeze(0)
-        obj_mesh_f = obj_pack["faces"].to(self.device).unsqueeze(0)
-        obj_certre = obj_pack["centre"].to(self.device).unsqueeze(0)
-        hand_mesh_v = mano_pack["verts"].to(self.device).unsqueeze(0)
-        hand_mesh_f = mano_pack["faces"].to(self.device).unsqueeze(0)
-        joints = mano_pack["joint"].to(self.device).unsqueeze(0)
-        hand_transformation = mano_pack["transformation"].to(self.device).unsqueeze(0)
-        self.initialization(obj_mesh_v, obj_mesh_f, obj_certre, hand_mesh_v, hand_mesh_f, joints, hand_transformation)
-        
-        self.fc_optimization_verbose(test_bar)
-        # self.gf_optimization_verbose(test_bar)
-        # self.gq_optimization_verbose(test_bar)
-        self.q_optimization_verbose_v2(test_bar)
-
-        self.robot_contact, self.actual_contact = self.robot_object_contact_check(self.q)
-        self.obj_model.contact_target = self.actual_contact
-        # self.fc_optimization_verbose(test_bar)
-        # self.gf_optimization_verbose(test_bar)
-
-        # self.gq_reoptimization_verbose(test_bar)
-
-        if self.visualize:
-            # from CtcSDF.CtcViz import data_viz
-            # data_viz('color',color.squeeze(0).numpy())
-            self.draw()
-    
-    def run_w_idx_nv(self, idx):
-        test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
-        input_pack, obj_pack, mano_pack = self.dataset[idx]
-        color = input_pack['color_img']
-
-        obj_mesh_v = obj_pack["verts"].to(self.device).unsqueeze(0)
-        obj_mesh_f = obj_pack["faces"].to(self.device).unsqueeze(0)
-        obj_certre = obj_pack["centre"].to(self.device).unsqueeze(0)
-        hand_mesh_v = mano_pack["verts"].to(self.device).unsqueeze(0)
-        hand_mesh_f = mano_pack["faces"].to(self.device).unsqueeze(0)
-        joints = mano_pack["joint"].to(self.device).unsqueeze(0)
-        hand_transformation = mano_pack["transformation"].to(self.device).unsqueeze(0)
-        self.initialization(obj_mesh_v, obj_mesh_f, obj_certre, hand_mesh_v, hand_mesh_f, joints, hand_transformation)
-        
-        data_nv = self.first_stage_opt_nv(test_bar)
-
-        self.robot_contact, self.actual_contact = self.robot_object_contact_check(self.q)
-        self.obj_model.contact_target = self.actual_contact
-
-
-
-        # self.fc_optimization_verbose(test_bar)
-        # self.gf_optimization_verbose(test_bar)
-
-        # self.gq_reoptimization_verbose(test_bar)
-
-        # if self.visualize:
-        #     # from CtcSDF.CtcViz import data_viz
-        #     # data_viz('color',color.squeeze(0).numpy())
-        #     self.draw()
-    
-    def run_verbose(self):
-        test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
-        #for i, (input_pack, obj_pack, mano_pack) in test_bar:
-        input_pack, obj_pack, mano_pack = next(iter(self.dataloader))
-        obj_mesh_v = obj_pack["verts"].to(self.device)
-        obj_mesh_f = obj_pack["faces"].to(self.device)
-        obj_certre = obj_pack["centre"].to(self.device)
-        hand_mesh_v = mano_pack["verts"].to(self.device)
-        hand_mesh_f = mano_pack["faces"].to(self.device)
-        joints = mano_pack["joint"].to(self.device)
-        hand_transformation = mano_pack["transformation"].to(self.device)
-        self.initialization(obj_mesh_v, obj_mesh_f, obj_certre, hand_mesh_v, hand_mesh_f, joints, hand_transformation)
-        self.fc_optimization_verbose(test_bar)
-        self.gq_optimization_verbose(test_bar)
-        self.q_optimization_verbose(test_bar)
-        #print("hand contact", self.obj_model.hand_contact)
-        if self.visualize:
-            self.draw()
-            
-    def run_iter(self):
-        test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
-        for i, (input_pack, obj_pack, mano_pack) in test_bar:
-            obj_mesh_v = obj_pack["verts"].to(self.device)
-            obj_mesh_f = obj_pack["faces"].to(self.device)
-            obj_certre = obj_pack["centre"].to(self.device)
-            hand_mesh_v = mano_pack["verts"].to(self.device)
-            hand_mesh_f = mano_pack["faces"].to(self.device)
-            joints = mano_pack["joint"].to(self.device)
-            hand_transformation = mano_pack["transformation"].to(self.device)
-            self.initialization(obj_mesh_v, obj_mesh_f, obj_certre, hand_mesh_v, hand_mesh_f, joints, hand_transformation)
-            self.fc_optimization_verbose(test_bar)
-            self.gq_optimization_verbose(test_bar)
-            self.q_optimization_verbose(test_bar)
-            #with open
-            
-    def run_viz(self, idx):
-        #test_bar = tqdm(enumerate(self.dataloader), total=len(self.dataloader), smoothing=0.9)
-        input_pack, obj_pack, mano_pack = self.dataset[idx]
-        obj_mesh_v = obj_pack["verts"].to(self.device).unsqueeze(0)
-        obj_mesh_f = obj_pack["faces"].to(self.device).unsqueeze(0)
-        obj_certre = obj_pack["centre"].to(self.device).unsqueeze(0)
-        hand_mesh_v = mano_pack["verts"].to(self.device).unsqueeze(0)
-        hand_mesh_f = mano_pack["faces"].to(self.device).unsqueeze(0)
-        joints = mano_pack["joint"].to(self.device).unsqueeze(0)
-        hand_transformation = mano_pack["transformation"].to(self.device).unsqueeze(0)
-        self.initialization(obj_mesh_v, obj_mesh_f, obj_certre, hand_mesh_v, hand_mesh_f, joints, hand_transformation)
-        contact_points = self.obj_model.contact_target
-        data = []
-        rob_points, rob_normals = self.robot.get_surface_points_normal_updated(self.q)
-        rob_cot_points, rob_cot_normals = self.robot.get_contact_points_normal_updated(self.q)
-        key_points = self.robot.get_keypoints(self.q)
-        # data.append(self.lines(rob_cot_points.view(-1,3), rob_cot_points.view(-1,3) + rob_cot_normals.view(-1,3) * 0.01))
-        #data.append(self.scatter(rob_cot_points.squeeze(0).view(-1,3).detach().cpu().numpy(), size=10, color='red'))
-        # data.extend(self.robot.get_mesh_updated(q =self.q, opacity=0.9))
-        # data.append(self.scatter(key_points.squeeze().detach().cpu().numpy()[-1,None], size = 10, color='red'))
-        #hand = self.mesh(hand_mesh_v.squeeze(0).cpu(), hand_mesh_f.squeeze(0).cpu(), opacity=0.5)
-        #print("size", contact_points[0,:].size())
-
-        #points = self.scatter(contact_points[0,:].unsqueeze(0).detach().cpu().numpy(), size = 10, color='blue')
-        # data.append(self.scatter(contact_points[1:].squeeze(0).detach().cpu().numpy(), size = 10, color='red'))
-        # data.append(self.scatter(contact_points[0:].squeeze(0).detach().cpu().numpy(), size = 10, color='blue'))
-        data.append(self.obj_model.draw(color="gray", opacity=0.3))
-        # data.append(points)
-        data.append(self.obj_model.hand_model.get_go_mesh(color="white", opacity=0.3))
-        # data.append(self.scatter(self.obj_model.contact_0.squeeze(0).cpu().numpy(), 4, 'red'))  
-        data.append(self.scatter(self.obj_model.contact_1.squeeze(0).cpu().numpy(), 4, 'green'))  
-        # data.append(self.lines(self.obj_model.contact_0, self.obj_model.contact_0_normal * 0.03+ self.obj_model.contact_0, color='red', width=4))
-        data.append(self.lines(self.obj_model.contact_1, self.obj_model.contact_1_normal * 0.03+ self.obj_model.contact_1, color='green', width=4))
-        
-        data.append(self.scatter(self.obj_model.contact_0.squeeze(0).cpu().numpy(), 4, 'red'))
-        data.append(self.lines(self.obj_model.contact_0, self.obj_model.contact_0_normal * 0.03+ self.obj_model.contact_0, color='red', width=4))
-
-        data.append(self.scatter(self.obj_model.contact_target.squeeze(0).cpu().numpy(), 8, 'blue'))
-        
-        color = ['red', 'blue', 'yellow', 'purple']
-        
-        # for i,subset in enumerate(self.obj_model.sub_contact):
-        #     data.append(self.scatter(subset.squeeze(0).cpu().numpy(), 4, color=color[i]))
-        #     data.append(self.lines(subset, self.obj_model.sub_contact_normal[i] * 0.03+ subset, color=color[i], width=4))
-            
-        
-        # data.append(self.scatter(self.obj_model.hand_contact_points().squeeze(0).detach().cpu().numpy(), size = 4, color='red'))
-        # data.append(self.scatter(self.obj_model.hand_contact_objnormals().squeeze(0).detach().cpu().numpy()*0.1, size = 4, color='green'))
-        # data.append(self.lines(self.obj_model.hand_contact_points(), self.obj_model.hand_contact_objnormals() * 0.01+ self.obj_model.hand_contact_points() ))
-        
-        # data.append(self.scatter(self.obj_model.hand_contact_points().squeeze(0).detach().cpu().numpy(), size = 4, color='red'))
-        
-        self.go_graph(data, transparent_background=True)
         
     def lines(self, start, end, color='red', width=2):
         N, _ = start.shape
@@ -1288,25 +1118,15 @@ class Optimization:
             plot_bgcolor='rgba(0,0,0,0)',  # Transparent plot background
             legend=dict(font=dict(color='rgba(0,0,0,0)'))  # Transparent legend
             )
-        fig.show() 
-                
-def plot_idx(idx, robot):
-    task = "GH"
-    
-    maximum_iter=[7000, 1, 1000]
-    dataset = dexycb_trainfullfeed()
-    opt = Optimization(robot=robot, dataset=dataset, device="cuda:0", maximum_iter=maximum_iter, visualize=True, repeat=1, mu=0.9, task=task)
-    opt.run_idx_json(idx, draw=True, save=True)
+        fig.show()
+        
+    def show_image(self, color):
+        color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+        plt.imshow(color)
+        plt.axis('off')
+        plt.show()
+        
 
-def index_gh(idx, robot):
-
-    task = "GH"
-    maximum_iter=[7000, 1, 1000]
-    dataset = dexycb_testfullfeed(load_mesh=True, pc_sample=1024, data_sample=7, precept=True)
-    opt = Optimization(robot=robot, dataset=dataset, device="cpu", maximum_iter=maximum_iter, visualize=True, repeat=1, mu=0.9, task=task, source="sdf")
-    # opt.result_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),'results_sdf_demo')
-
-    opt.run_idx_json(idx, False, True, False)
 
 def run_optimization_nv(robot, task):
 

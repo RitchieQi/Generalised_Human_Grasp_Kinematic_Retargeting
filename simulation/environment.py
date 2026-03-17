@@ -21,12 +21,20 @@ import traceback
 from multiprocessing import Process, Queue
 from itertools import product
 import os
-from bullet_base import PybulletBase
-from object_base import objects
-from robot_base import shadow, allegro, barrett, robotiq, MountingBase
-from opt_results_loader import ycb_opt_fetcher
-from trajectory import Trajectory
-from optimisation.utils import rotate_vector, rotate_vector_inverse, quat_mult
+try:
+    from .bullet_base import PybulletBase
+    from .object_base import objects
+    from .robot_base import shadow, allegro, barrett, robotiq, MountingBase
+    from .opt_results_loader import ycb_opt_fetcher
+    from .trajectory import Trajectory
+    from .utils import rotate_vector, rotate_vector_inverse, quat_mult
+except ImportError:
+    from bullet_base import PybulletBase
+    from object_base import objects
+    from robot_base import shadow, allegro, barrett, robotiq, MountingBase
+    from opt_results_loader import ycb_opt_fetcher
+    from trajectory import Trajectory
+    from utils import rotate_vector, rotate_vector_inverse, quat_mult
 class Environment:
     def __init__(self,
                  robot: str = "Shadow",
@@ -306,8 +314,9 @@ class Environment:
         except Exception as e:
             print(e)
             traceback.print_exc()
+        finally:
             self.remove_scene()
-    
+            self.sim.pc.disconnect()
     def run_idx(self, idx: int, record: bool) -> None:
         self.sim._connect_()
 

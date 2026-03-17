@@ -156,25 +156,31 @@ class Trajectory:
             coeffs = self.cubic_spline_coefficients(initial_positions[i], target_positions[i],
                                             initial_velocities[i], target_velocities[i],
                                             t0, tf)
-            via_time[i] = self.solve_cube_polynomial(coeffs, via_position[i], [t0, tf])
+            t_via = self.solve_cube_polynomial(coeffs, via_position[i], [t0, tf])
+            via_time[i] = np.nan if t_via is None else t_via
             for j, t in enumerate(time_steps):
                 q, q_dot, q_ddot = self.cubic_spline_trajectory(coeffs, t)
                 positions[j, i] = q
                 velocities[j, i] = q_dot
                 accelerations[j, i] = q_ddot
-        timestamp = (np.nanmean(via_time) * self.tm).astype(int)
-        return positions, velocities, accelerations, time_steps, timestamp, np.nanmean(via_time)
+        mean_via_time = np.nanmean(via_time)
+        if np.isnan(mean_via_time):
+            mean_via_time = (t0 + tf) * 0.5
+        timestamp = int(mean_via_time * self.tm)
+        timestamp = int(np.clip(timestamp, 0, max(0, num_points - 1)))
+        return positions, velocities, accelerations, time_steps, timestamp, mean_via_time
         
     def basic_motion_planning_asynj(self, initial_positions: np.ndarray, target_positions: np.ndarray, tf: int, tt: int, timestamp: int, num_points: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         initial_velocities = np.zeros_like(initial_positions)
         target_velocities = np.zeros_like(target_positions)
         
         num_joints = len(initial_positions)
-        time_steps = np.linspace(tf, tt, num_points-timestamp)
+        num_segment = max(1, num_points - timestamp)
+        time_steps = np.linspace(tf, tt, num_segment)
         
-        positions = np.zeros((num_points-timestamp, num_joints))
-        velocities = np.zeros((num_points-timestamp, num_joints))
-        accelerations = np.zeros((num_points-timestamp, num_joints))
+        positions = np.zeros((num_segment, num_joints))
+        velocities = np.zeros((num_segment, num_joints))
+        accelerations = np.zeros((num_segment, num_joints))
         
         for i in range(num_joints):
             coeffs = self.cubic_spline_coefficients(initial_positions[i], target_positions[i],

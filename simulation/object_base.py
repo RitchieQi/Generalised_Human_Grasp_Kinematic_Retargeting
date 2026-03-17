@@ -9,7 +9,10 @@ from typing import List, Optional, Tuple, Union, Iterator, Any, Dict
 from scipy.spatial.transform import Rotation as R
 import trimesh as tm
 import os
-from bullet_base import PybulletBase
+try:
+    from .bullet_base import PybulletBase
+except ImportError:
+    from bullet_base import PybulletBase
 class objects:
     def __init__(
         self,

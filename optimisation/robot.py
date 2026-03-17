@@ -1,6 +1,5 @@
 import torch
 import pytorch_kinematics as pk
-import urdf_parser_py.urdf as u
 from scipy.spatial.transform import Rotation as R
 from plotly import graph_objects as go
 import json
@@ -9,14 +8,37 @@ from manopth.rodrigues_layer import batch_rodrigues
 import numpy as np
 import os
 import trimesh as tm
-from optimisation_tmp.utils import *
+try:
+    from .utils import *  # noqa: F403
+except ImportError:
+    from optimisation.utils import *  # noqa: F403
 from pytorch3d.structures import Meshes
 from abc import ABC, abstractmethod
 from scipy.optimize import linear_sum_assignment
 from torch.nn.functional import relu
-import optimisation_tmp.icp as icp
+try:
+    from . import icp
+except ImportError:
+    import optimisation.icp as icp
 
 osp = os.path
+
+
+def _urdf_root():
+    repo_root = osp.abspath(osp.join(osp.dirname(__file__), ".."))
+    candidates = [
+        osp.join(repo_root, "model", "urdf"),
+        osp.join(repo_root, "urdf"),
+    ]
+    for path in candidates:
+        if osp.isdir(path):
+            return path
+    return candidates[-1]
+
+
+def _from_urdf_root(*parts):
+    return osp.join(_urdf_root(), *parts)
+
 
 class CtcRobot(ABC):
     """Base class for all robots
@@ -57,6 +79,8 @@ class CtcRobot(ABC):
         self.robot_model = None
         self.minuend =  None
         self.subtrahend = None 
+        self.nv_human_tip_indices = None
+
     def forward_kinematics(self, q = None):
         if q is None:
             q = self.q
@@ -352,14 +376,11 @@ class CtcRobot(ABC):
         
         return dict(distance_loss=position_distance.mean(), joint_limit=joint_limit.sum(), contact_loss = contact_loss, loss=contact_loss + 100*joint_limit.sum() + 5e-4*regularization)
         
-    def kinematics_distance_aligned(self, target, q):
-        contact_point, contact_normal = self.get_contact_points_normal_updated(q)
-        target_contact_point, target_contact_normal = target
-        pass
+
               
     def kinematics_distance_nv(self, target, q):
         """
-        the method to optimize the robot posture using the NVD/UW methid
+        the method to optimize the robot posture using the NVD/UW method
         target: (7, 3) np.ndarray, [wrist, index, middle, ring, pinky, thumb, object]
         wrist: target[0, :]  [wrist]
         fingertips: target[1:5, :] [index, middle, ring, pinky, thumb]
@@ -380,16 +401,24 @@ class CtcRobot(ABC):
         """
         # the three povital points: wrist, thumb, object
         # the keypoints of the robot hand
-        robot_pose = self.get_keypoints(q).squeeze(0)
+        robot_pose = self.get_keypoints(q, None).squeeze(0) # wrist, fingertips
         human_pose_ = target[:-1, :].unsqueeze(0) #[wrist, index, middle, ring, pinky, thumb]
         obj_c = target[-1, :].unsqueeze(0) #[object]
+        # obj_c = torch.tensor([0.0, 0.0, 0.0], device=self.device).unsqueeze(0) # set object center to origin
         
         robot_minuend = robot_pose[:, self.minuend, :]
         robot_subtrahend = robot_pose[:, self.subtrahend, :]
         robot_tips = robot_pose[:, 1:, :] # [index, ..., thumb]
         num_finger = robot_tips.size(1)
         
-        human_pose = torch.cat((human_pose_[:, :num_finger, :], human_pose_[:, -1, :].unsqueeze(1)), dim=1) 
+        if self.nv_human_tip_indices is None:
+            tip_indices = list(range(1, num_finger + 1))
+        else:
+            tip_indices = self.nv_human_tip_indices
+            if len(tip_indices) != num_finger:
+                raise ValueError(f"nv_human_tip_indices length ({len(tip_indices)}) != robot finger num ({num_finger})")
+        tip_indices = torch.tensor(tip_indices, dtype=torch.long, device=self.device)
+        human_pose = torch.cat((human_pose_[:, :1, :], human_pose_[:, tip_indices, :]), dim=1)
         human_minuend = human_pose[:, self.minuend, :] 
         human_subtrahend = human_pose[:, self.subtrahend, :]
         human_tips = human_pose[:, 1:, :]
@@ -398,10 +427,13 @@ class CtcRobot(ABC):
         human_vector = human_minuend - human_subtrahend
         dist_0 = torch.norm(robot_vector - human_vector, dim=2).pow(2).mean()
         
-        robot_object = robot_tips - obj_c
-        human_object = human_tips - obj_c
-        dist_1 = torch.norm(robot_object - human_object, dim=2).pow(2).mean()
-        
+        # robot_object = robot_tips - obj_c
+        # human_object = human_tips - obj_c
+        # dist_1 = torch.norm(robot_tips - human_tips, dim=2).pow(2).mean()
+        dist_1 = []
+        for i in range(robot_tips.size(1)):
+            dist_1.append(torch.norm((robot_tips[:, i, :] - human_tips[:, i, :]), dim=1).pow(2).mean())
+        dist_1 = torch.stack(dist_1).mean()
         
         #This guide loss is equivalent to dist_1
         #guide_loss = torch.norm(robot_tips - human_tips, dim=2).pow(2).mean()
@@ -420,8 +452,8 @@ class CtcRobot(ABC):
 class Shadow(CtcRobot):
     def __init__(self, batch, device):
         super(Shadow, self).__init__(batch, device)
-        urdf_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'sr_description','urdf','shadow_hand.urdf')
-        mesh_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'sr_description','meshes', 'shadow_hand','hand')
+        urdf_path = _from_urdf_root('sr_description', 'urdf', 'shadow_hand.urdf')
+        mesh_path = _from_urdf_root('sr_description', 'meshes', 'shadow_hand', 'hand')
         self.mesh_path = mesh_path
         self.robot_model = 'Shadow'
         self.minimal_dist = 0.005
@@ -458,7 +490,7 @@ class Shadow(CtcRobot):
         #                              'rh_rfdistal': ['rh_rfmiddle','rh_rfdistal'],
         #                              'rh_lfdistal': ['rh_lfmiddle','rh_lfdistal'],
         #                              'rh_thdistal': ['rh_thmiddle','rh_thdistal']}
-        self.contact_points_file = json.load(open(osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'contact_shadowhand.json')))
+        self.contact_points_file = json.load(open(_from_urdf_root('contact_shadowhand.json')))
         self.calibration_rotation = batch_rodrigues(torch.tensor([0,-(torch.pi/2),0]).view(1,3)).view(1,3,3).to(self.device)
         # self.calibration_translation = torch.tensor([0.0000, -0.0100, 0.2130]).view(1,3,1).to(self.device)
         self.calibration_translation = torch.tensor([0.0000, -0.0100, 0.2130]).view(1,3,1).to(self.device)
@@ -469,13 +501,14 @@ class Shadow(CtcRobot):
 
         self.minuend =    torch.tensor([1,2,3,4,5,  1,2,3,4,  2,3,4,  2,4], dtype = torch.long, device=self.device)
         self.subtrahend = torch.tensor([0,0,0,0,0,  5,5,5,5,  1,1,1,  3,3], dtype = torch.long ,device=self.device)      
+        self.nv_human_tip_indices = [1, 2, 3, 4, 5]        
         self.joint_lower = torch.tensor([[-0.524, -0.698, -0.349, 0.0, 0.0, 0.0, -0.349, 0.0, 0.0, 0.0, -0.349, 0.0, 0.0, 0.0, 0.0, 
                                           -0.349, 0.0, 0.0, 0.0, -1.047, 0.0, -0.209, -0.698, 0.0]]
                                          ,dtype=torch.float32, device=self.device).repeat([self.batch, 1])
         self.joint_upper = torch.tensor([[0.175, 0.489, 0.349, 1.571, 1.571, 1.571, 0.349, 1.571, 1.571, 1.571, 0.349, 1.571, 1.571, 1.571, 0.785, 
                                           0.349, 1.571, 1.571, 1.571, 1.047, 1.222, 0.209, 0.698, 1.571]],dtype=torch.float32, device=self.device).repeat([self.batch, 1])
-        # self.q_init = torch.tensor([0., 0., -0.349, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., -0.349, 0., 0., 0., -1.047, 1.222, 0., 0., 0.],dtype=torch.float32, device=self.device).repeat([self.batch, 1])
-        self.q_init = torch.zeros(24, dtype=torch.float32, device=self.device).repeat([self.batch, 1])
+        self.q_init = torch.tensor([0., 0., -0.349, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., -0.349, 0., 0., 0., -1.047, 1.222, 0., 0., 0.],dtype=torch.float32, device=self.device).repeat([self.batch, 1])
+        # self.q_init = torch.zeros(24, dtype=torch.float32, device=self.device).repeat([self.batch, 1])
         for frame_name in self.chain.get_frame_names(exclude_fixed=False):
             frame = self.chain.find_frame(frame_name)
             for link_vis in frame.link.visuals:
@@ -514,7 +547,7 @@ class Shadow(CtcRobot):
                 elif frame.link.name in self.dense_sample_link:
                     pts, pts_face_index = tm.sample.sample_surface(mesh=mesh, count=128)
                 else:
-                    pts, pts_face_index = tm.sample.sample_surface(mesh=mesh, count=32)
+                    pts, pts_face_index = tm.sample.sample_surface(mesh=mesh, count=64)
                 pts_normal = np.array([mesh.face_normals[i] for i in pts_face_index], dtype=float)
                 pts *= scale
                 pts = np.matmul(rot, pts.T).T + pos
@@ -533,28 +566,13 @@ class Shadow(CtcRobot):
                     cont_nls = contact_pack[1]
                     cont_nls = np.matmul(rot, cont_nls.T).T
                     self.robot_contact_normal[frame.link.name] = torch.from_numpy(cont_nls).to(self.device).float().unsqueeze(0).repeat(self.batch, 1, 1)
-                #contact points
-                # if frame.link.name in self.contact_points_file:
-                #     contact_pack = np.array(self.contact_points_file[frame.link.name]) #2, 16, 3
-
-                    
-                #     contact_points = mesh.vertices[contact_points_i] * scale
-                #     contact_points = np.matmul(rot, contact_points.T).T + pos
-                #     contact_points = torch.cat([torch.from_numpy(contact_points).to(self.device).float(), torch.ones([4,1]).to(self.device).float()], dim=-1)
-                #     self.robot_contact_points[frame.link.name] = contact_points.unsqueeze(0).repeat(self.batch, 1, 1)
-                #     v1 = contact_points[1, :3] - contact_points[0, :3]
-                #     v2 = contact_points[2, :3] - contact_points[0, :3]
-                #     v1 = v1 / torch.norm(v1)
-                #     v2 = v2 / torch.norm(v2)
-                #     normal = torch.cross(v1, v2).view(1,3)
-                #     self.robot_contact_normal[frame.link.name] = normal.unsqueeze(0).repeat(self.batch, 1, 1)
 
 
 class Allegro(CtcRobot):
     def __init__(self, batch, device):
         super(Allegro, self).__init__(batch, device)
-        urdf_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'allegro_hand','allegro_hand_description_right.urdf')
-        mesh_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'allegro_hand','meshes')
+        urdf_path = _from_urdf_root('allegro_hand', 'allegro_hand_description_right.urdf')
+        mesh_path = _from_urdf_root('allegro_hand', 'meshes')
         self.mesh_path = mesh_path
 
         self.robot_model = 'Allegro'
@@ -575,7 +593,7 @@ class Allegro(CtcRobot):
                                     'link_11.0_tip': ['link_11.0_tip']}
                                     # 'link_15.0_tip': ['link_15.0_tip']}
         self.dense_sample_link = ['link_3.0_tip', 'link_7.0_tip', 'link_11.0_tip', 'link_15.0_tip']
-        self.contact_points_file = json.load(open(osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'contact_allegro.json')))
+        self.contact_points_file = json.load(open(_from_urdf_root('contact_allegro.json')))
         self.calibration_rotation = euler_to_mat(torch.tensor([-torch.pi/2,torch.pi,torch.pi/2]), False).view(1,3,3).to(self.device).float()
         self.calibration_translation = torch.tensor([0.0500, 0.0000, 0.1000]).view(1,3,1).to(self.device)
         self.device = device
@@ -583,6 +601,8 @@ class Allegro(CtcRobot):
         
         self.minuend =    torch.tensor([1,2,3,4, 1,2,3, 2,3, 2], dtype = torch.long, device=self.device)
         self.subtrahend = torch.tensor([0,0,0,0, 4,4,4, 1,1, 3], dtype = torch.long, device=self.device)      
+        self.nv_human_tip_indices = [1, 2, 3, 5]
+        
         self.joint_lower = torch.tensor([[-0.47, -0.196, -0.174, -0.227, -0.47, -0.196, -0.174, -0.227, -0.47, -0.196, -0.174, -0.227
                                         , 0.263, -0.105, -0.189, -0.162]] ,dtype=torch.float32, device=self.device).repeat([self.batch, 1])
         self.joint_upper = torch.tensor([[0.47, 1.61, 1.709, 1.618, 0.47, 1.61, 1.709, 1.618, 0.47, 1.61, 1.709, 1.618,
@@ -646,8 +666,8 @@ class Allegro(CtcRobot):
 class Barrett(CtcRobot):
     def __init__(self, batch, device):
         super(Barrett, self).__init__(batch, device)
-        urdf_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'barrett_adagrasp','model.urdf')
-        mesh_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'barrett_adagrasp','meshes')
+        urdf_path = _from_urdf_root('barrett_adagrasp', 'model.urdf')
+        mesh_path = _from_urdf_root('barrett_adagrasp', 'meshes')
         self.mesh_path = mesh_path
 
         self.robot_model = 'Barrett'
@@ -666,7 +686,7 @@ class Barrett(CtcRobot):
                                     'bh_finger_23_link': ['bh_finger_23_link'],
                                     'bh_finger_33_link': ['bh_finger_33_link']}
         self.dense_sample_link = ['bh_finger_13_link','bh_finger_23_link','bh_finger_33_link']
-        self.contact_points_file = json.load(open(osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'contact_barrett.json')))
+        self.contact_points_file = json.load(open(_from_urdf_root('contact_barrett.json')))
         self.calibration_rotation = euler_to_mat(torch.tensor([0,torch.pi/2,torch.pi]), False).view(1,3,3).to(self.device).float()
         self.calibration_translation = torch.tensor([0.0000, 0.0000, 0.0000]).view(1,3,1).to(self.device) # 0, 0, 0.1
         self.device = device
@@ -674,6 +694,8 @@ class Barrett(CtcRobot):
         
         self.minuend =    torch.tensor([1,2,3, 1,2, 1], dtype = torch.long, device=self.device)
         self.subtrahend = torch.tensor([0,0,0, 3,3, 2], dtype = torch.long, device=self.device)      
+        self.nv_human_tip_indices = [1, 2, 5]
+
         self.joint_lower = torch.tensor([[0,0,0,0,0,0,0,0]]
                                          ,dtype=torch.float32, device=self.device).repeat([self.batch, 1])
         self.joint_upper = torch.tensor([[2.44,0.84,3.141,2.44,0.84,3.141,2.44,0.84]],dtype=torch.float32, device=self.device).repeat([self.batch, 1])
@@ -738,14 +760,9 @@ class Barrett(CtcRobot):
 class Robotiq(CtcRobot):
     def __init__(self, batch, device):
         super(Robotiq, self).__init__(batch, device)
-        urdf_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'robotiq_arg85','urdf','robotiq_arg85_description.urdf')
-        mesh_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'robotiq_arg85','meshes')
+        urdf_path = _from_urdf_root('robotiq_arg85', 'urdf', 'robotiq_arg85_description.urdf')
+        mesh_path = _from_urdf_root('robotiq_arg85', 'meshes')
         self.mesh_path = mesh_path
-
-        # urdf_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'Robotiq_85', 'robotiq_85.urdf')
-        # mesh_path = osp.join(osp.dirname(__file__), '..',  'model', 'urdf', 'Robotiq_85', 'robotiq_85', 'visual')
-        # urdf_path = osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'robotiq_85v2', 'robotiq_2f_85_v3.urdf')
-        # mesh_path = osp.join(osp.dirname(__file__), '..',  'model', 'urdf', 'robotiq_85v2', 'robotiq_2f_85')
 
         self.robot_model = 'Robotiq'
         self.contacts_num = 2
@@ -759,7 +776,7 @@ class Robotiq(CtcRobot):
         self.self_collision_links = {'left_inner_finger': ['left_inner_finger','left_inner_knuckle'],
                                         'right_inner_finger': ['right_inner_finger','right_inner_knuckle']}
         self.dense_sample_link = ['left_inner_finger','right_inner_finger']
-        self.contact_points_file = json.load(open(osp.join(osp.dirname(__file__), '..', 'model', 'urdf', 'contact_robotiq_arg85.json')))
+        self.contact_points_file = json.load(open(_from_urdf_root('contact_robotiq_arg85.json')))
         self.calibration_rotation = euler_to_mat(torch.tensor([torch.pi/2,torch.pi,3*torch.pi/2]), False).view(1,3,3).to(self.device).float()
         self.calibration_translation = torch.tensor([0.0000, 0.0000, 0.0000]).view(1,3,1).to(self.device)
         self.device = device
@@ -777,6 +794,8 @@ class Robotiq(CtcRobot):
         #self.q_init = self.q * self.expend_
         self.minuend =    torch.tensor([1,2, 1], dtype = torch.long, device=self.device)
         self.subtrahend = torch.tensor([0,0, 2], dtype = torch.long, device=self.device)    
+        self.nv_human_tip_indices = [1, 5]
+
         for frame_name in self.chain.get_frame_names(exclude_fixed=False):
             frame = self.chain.find_frame(frame_name)
             for link_vis in frame.link.visuals:

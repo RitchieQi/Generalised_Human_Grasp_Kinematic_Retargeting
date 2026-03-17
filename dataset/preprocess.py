@@ -13,7 +13,10 @@ from dex_ycb_toolkit.dex_ycb import _SUBJECTS, _SERIALS
 import os.path as osp
 import os
 
-def generate_image(img_folder='/home/liyuan/DexYCB', data_dir = osp.join(osp.dirname(__file__), 'data'),task='train'):
+def generate_image(img_folder=None, data_dir = osp.join(osp.dirname(__file__), 'data'),task='train'):
+    if img_folder is None:
+          raise ValueError("please provide the path to the DexYCB dataset image folder using --img_folder")
+    
     with open(osp.join(data_dir, 'dexycb_{}_s0.json').format(task), 'r') as f:
          json_data = json.load(f)
     anno_data = json_data['annotations']

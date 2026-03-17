@@ -31,7 +31,8 @@ class CtcSDF_dataset(Dataset):
         self.sdf_dir = osp.join(data_dir, "sdf_data")
         self.recon_scale= sdf_scale
         self.sdf_sample = sdf_sample
-        os.environ["DEX_YCB_DIR"] = '/home/liyuan/DexYCB/'
+        dexycb_dir = os.environ.get("DEX_YCB_DIR", osp.join(osp.expanduser("~"), "DexYCB"))
+        os.environ["DEX_YCB_DIR"] = dexycb_dir
         self.getdata = DexYCBDataset('s0', task)
         self.faces = torch.LongTensor(np.load(osp.join(osp.dirname(__file__),'data', 'closed_fmano.npy')))
 
