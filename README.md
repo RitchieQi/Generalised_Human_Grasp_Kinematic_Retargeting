@@ -90,6 +90,9 @@ This repository is actively maintained to improve readability and usability. But
 
 Please open an issue if you have any questions or encounter problems.
 
+#### Planned Improvements
+- [ ] Configuration system: centralise optimisation parameters into a unified config file for easier tuning and better cross-domain usability.
+
 ### Citation
 
 ```text
